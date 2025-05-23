@@ -1,6 +1,6 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
-"""Terra Caribbean Property Intelligence: Geospatial View - Streamlit Version"""
+"""Terra Caribbean Property Dashboard - Streamlit Version"""
 
 import streamlit as st
 import pandas as pd
@@ -202,7 +202,7 @@ def get_cached_alternative_parish_data(log_capture_list_ref):
         final_alt_cols = ['name', 'OSM_Parish_Name', 'geometry']; existing_final_cols = [col for col in final_alt_cols if col in parishes_alt.columns]
         for col_ensure in ['name', 'OSM_Parish_Name']:
             if col_ensure not in parishes_alt.columns: parishes_alt[col_ensure] = pd.Series([None] * len(parishes_alt), index=parishes_alt.index); existing_final_cols.append(col_ensure)
-        return parishes_alt[existing_final_cols]
+        return parishes_alt[existing_alt_cols]
     except Exception as e: log_capture_list_ref.append(f"Error alt parish data: {e}\n{traceback.format_exc()}\n"); return parishes_alt
 
 
@@ -415,9 +415,9 @@ class TerraDashboardLogic:
                 if not parishes_4326.empty:
                     parish_boundary_layer = folium.FeatureGroup(name="Parish Boundaries & Centers", show=True).add_to(m)
                     folium.GeoJson(parishes_4326,style_function=lambda x: {'fillColor':'#D3D3D3','color':'#333333','weight':1.5,'fillOpacity':0.3},
-                                     highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
-                                     tooltip=folium.GeoJsonTooltip(fields=['OSM_Parish_Name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
-                                   ).add_to(parish_boundary_layer)
+                                   highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
+                                   tooltip=folium.GeoJsonTooltip(fields=['OSM_Parish_Name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
+                                  ).add_to(parish_boundary_layer)
                     for idx, parish_row in parishes_4326.iterrows():
                         name = parish_row['OSM_Parish_Name']
                         try:
@@ -440,8 +440,8 @@ class TerraDashboardLogic:
                     for _, row in feature_polygons_4326.iterrows():
                         single_feature_gdf = gpd.GeoDataFrame([row], crs=feature_polygons_4326.crs)
                         folium.GeoJson(single_feature_gdf, style_function=lambda x: get_feature_style(x['properties']),
-                                         highlight_function=lambda x: {'weight': 3, 'color': 'black', 'fillOpacity': 0.6},
-                                         tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Name:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=False)).add_to(feature_layer)
+                                       highlight_function=lambda x: {'weight': 3, 'color': 'black', 'fillOpacity': 0.6},
+                                       tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Name:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=False)).add_to(feature_layer)
             if not analyzed_gdf.empty:
                 if 'Property Type Standardized' not in analyzed_gdf.columns: analyzed_gdf['Property Type Standardized'] = self.standardize_property_type(analyzed_gdf.get('Property Type', pd.Series(dtype=str)))
                 analyzed_gdf['Category'] = analyzed_gdf.get('Category', pd.Series(dtype=str)).astype(str).fillna('Unknown')
@@ -529,8 +529,8 @@ class TerraDashboardLogic:
                 avg_sz_val = stats_gdf['Size_sqft'].mean() if 'Size_sqft' in stats_gdf and stats_gdf['Size_sqft'].notna().any() else np.nan
                 avg_sz_str = f"{avg_sz_val:,.0f} sq ft" if pd.notna(avg_sz_val) else "N/A"
                 self.stats_data_for_streamlit = [f"Total Properties Analyzed: {num_analyzed}",f"Unique Parishes in Data: {num_parishes}", f"Avg Beach Dist: {avg_beach_dist_str}",
-                                                f"Highest Property Price: {h_pr}",f"Lowest Property Price: {l_pr}", f"Avg Attractions (2km): {avg_tr_str}",
-                                                f"Properties For Sale: {s_cnt}",f"Properties For Rent: {r_cnt}",f"Average Property Size: {avg_sz_str}"]
+                                     f"Highest Property Price: {h_pr}",f"Lowest Property Price: {l_pr}", f"Avg Attractions (2km): {avg_tr_str}",
+                                     f"Properties For Sale: {s_cnt}",f"Properties For Rent: {r_cnt}",f"Average Property Size: {avg_sz_str}"]
         except Exception as e: self._capture_print(f"Error display_stats: {e}\n{traceback.format_exc()}"); self.stats_data_for_streamlit.append("Error loading stats.")
 
     def get_export_dataframe(self):
@@ -538,7 +538,7 @@ class TerraDashboardLogic:
             df_to_export = self.analyzed_properties.copy()
             if 'geometry' in df_to_export.columns and not df_to_export.geometry.empty:
                 if df_to_export.crs and df_to_export.crs != "EPSG:4326":
-                        df_to_export = df_to_export.to_crs("EPSG:4326")
+                       df_to_export = df_to_export.to_crs("EPSG:4326")
                 df_to_export['latitude'] = df_to_export.geometry.y
                 df_to_export['longitude'] = df_to_export.geometry.x
             cols_to_drop = ['geometry', 'original_index', 'Parish_join_key']
@@ -551,8 +551,7 @@ class TerraDashboardLogic:
 
 # --- Streamlit App UI and Main Logic ---
 def main():
-    # --- THIS IS WHERE THE APP NAME IS SET ---
-    st.set_page_config(page_title="Terra Caribbean Property Intelligence: Geospatial View", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Terra Caribbean Dashboard", layout="wide", initial_sidebar_state="expanded")
 
     # CORRECTED: Initialize ALL session state variables at the top
     if 'analysis_triggered' not in st.session_state:
@@ -580,10 +579,24 @@ def main():
 
         run_button_clicked = st.button("🚀 Run Analysis", use_container_width=True)
 
-    # --- THIS IS ALSO WHERE THE APP NAME IS SET (MAIN TITLE) ---
-    st.title("🏝️ Terra Caribbean Property Intelligence: Geospatial View")
+    st.title("🏝️ Terra Caribbean Property Dashboard")
     st.markdown("Interactive tool to analyze property listings with geospatial data for Barbados.")
     st.markdown("---")
+
+# --- <<< ADD THIS SECTION HERE >>> ---
+    st.info("""
+    **Understanding the Map:**
+
+    The primary output is an **Interactive Thematic GIS Web Map**. This means you can:
+    * Navigate (zoom/pan) a map of Barbados.
+    * View multiple layers like **Parish Boundaries**, **Key Land Features** (parks, schools), and **Points of Interest**.
+    * Click on **Parish Summary Markers** to see aggregated real estate data (counts, averages) for that area.
+    * Toggle layers on/off for clarity.
+
+    *It's designed to give you a visual, parish-level overview of the property landscape.*
+    """)
+    # --- <<< END OF ADDED SECTION >>> ---
+
 
     if run_button_clicked:
         if uploaded_file is not None:
@@ -622,22 +635,24 @@ def main():
             if st.session_state.get('analysis_done') and dashboard_instance.map_html_content:
                 st.components.v1.html(dashboard_instance.map_html_content, height=700, scrolling=True)
             elif st.session_state.get('analysis_triggered'):
-               st.info("Map is being generated or was not created. If analysis failed, check logs.")
+                st.info("Map is being generated or was not created. If analysis failed, check logs.")
             else:
-               st.info("Map will be displayed here after analysis is run.")
+                st.info("Map will be displayed here after analysis is run.")
 
         with tab_chart:
             st.subheader("Price vs. Beach Distance Chart")
             if st.session_state.get('analysis_done') and dashboard_instance.chart_path and os.path.exists(dashboard_instance.chart_path):
                 try:
                     image = Image.open(dashboard_instance.chart_path)
+                    # --- THIS IS THE CORRECTED LINE ---
                     st.image(image, caption="Property Price vs. Distance to Nearest Beach", use_container_width=True)
+                    # ------------------------------------
                 except Exception as e:
                     st.error(f"Could not load chart: {e}")
             elif st.session_state.get('analysis_triggered'):
-               st.info("Chart is being generated or was not created. If analysis failed, check logs.")
+                st.info("Chart is being generated or was not created. If analysis failed, check logs.")
             else:
-               st.info("Chart will be displayed here after analysis is run.")
+                st.info("Chart will be displayed here after analysis is run.")
 
         with tab_stats:
             st.subheader("Key Statistics")
@@ -645,9 +660,9 @@ def main():
                 for item in dashboard_instance.stats_data_for_streamlit:
                     st.markdown(f"- {item}")
             elif st.session_state.get('analysis_triggered'):
-               st.info("Statistics are being generated.")
+                st.info("Statistics are being generated.")
             else:
-               st.info("Key statistics will be displayed here after analysis is run.")
+                st.info("Key statistics will be displayed here after analysis is run.")
 
         with tab_export:
             st.subheader("Export Analyzed Data")
@@ -662,9 +677,9 @@ def main():
                                        file_name="terra_analysis_results.csv", mime="text/csv",
                                        key="download_csv_button")
                 elif st.session_state.get('analysis_triggered') :
-                   st.info("No analyzed data available for export (result might be empty).")
+                    st.info("No analyzed data available for export (result might be empty).")
             else:
-               st.info("Analyzed data will be available for export here after analysis is run.")
+                st.info("Analyzed data will be available for export here after analysis is run.")
 
         with tab_console:
             st.subheader("Analysis Log")
@@ -672,9 +687,9 @@ def main():
                 log_content = "".join(dashboard_instance.log_capture)
                 st.text_area("Log Output:", value=log_content, height=500, key="console_log_area_display", disabled=True)
             elif st.session_state.get('analysis_triggered'):
-               st.info("Attempting to capture logs...")
+                st.info("Attempting to capture logs...")
             else:
-               st.info("Console logs from the analysis will appear here.")
+                st.info("Console logs from the analysis will appear here.")
 
         if st.session_state.get('error_during_analysis'):
             st.error("An error occurred during the last analysis. Please review the console log in the 'Console Log' tab.")
@@ -688,25 +703,7 @@ def main():
             log_content = "".join(st.session_state.dashboard_logic_instance.log_capture)
             st.text_area("Log Output:", value=log_content, height=500, key="error_console_log_area_display_alt", disabled=True)
     else:
-       st.info("👋 Welcome! Please upload a property data file and click '🚀 Run Analysis' in the sidebar to begin.")
-
-    # --- ADDED CREDITS SECTION ---
-    st.markdown("---") # Add a visual separator
-
-    property_count = 0
-    dashboard_instance = st.session_state.get('dashboard_logic_instance') # Ensure we have the latest instance
-    if st.session_state.get('analysis_done') and dashboard_instance and not dashboard_instance.analyzed_properties.empty:
-        property_count = len(dashboard_instance.analyzed_properties)
-
-    credits_line1 = "Data Sources: Terra Caribbean, OpenStreetMap"
-    if property_count > 0:
-        credits_line1 += f" • Displaying {property_count} properties."
-
-    credits_line2 = "© 2025 Terra Caribbean Geospatial Analytics Platform • All Prices in USD"
-    credits_line3 = "App Created by Matthew Blackman. Assisted by AI."
-
-    st.caption(f"{credits_line1}\n{credits_line2}\n{credits_line3}")
-    # --- END OF CREDITS SECTION ---
+        st.info("👋 Welcome! Please upload a property data file and click '🚀 Run Analysis' in the sidebar to begin.")
 
 if __name__ == "__main__":
     main()
