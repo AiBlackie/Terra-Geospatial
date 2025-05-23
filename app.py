@@ -579,7 +579,7 @@ def main():
 
         run_button_clicked = st.button("🚀 Run Analysis", use_container_width=True)
 
-    st.title("🏝️ Terra Caribbean Property Dashboard")
+    st.title("🏝️ Terra Caribbean Property Intelligence:Geospatial View")
     st.markdown("Interactive tool to analyze property listings with geospatial data for Barbados.")
     st.markdown("---")
 
