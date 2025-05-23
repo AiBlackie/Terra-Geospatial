@@ -1,6 +1,6 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
-"""Terra Caribbean Property Dashboard - Streamlit Version"""
+"""Terra Caribbean Property Intelligence:Geospatial View - Streamlit Version"""
 
 import streamlit as st
 import pandas as pd
