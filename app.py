@@ -551,7 +551,7 @@ class TerraDashboardLogic:
 
 # --- Streamlit App UI and Main Logic ---
 def main():
-    st.set_page_config(page_title="Terra Caribbean Dashboard", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Terra Caribbean Property Intelligence:Geospatial View", layout="wide", initial_sidebar_state="expanded")
 
     # CORRECTED: Initialize ALL session state variables at the top
     if 'analysis_triggered' not in st.session_state:
