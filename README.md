@@ -1,114 +1,131 @@
-# Terra Caribbean Property Intelligence: Geospatial View
+# Terra Caribbean: Terrain & Property View (Barbados)
 
-## 🏝️ Overview
+**Version:** 1.0
+**Date:** May 24, 2025
+**Author:** Matthew Blackman (Assisted by AI)
 
-This project is an interactive Streamlit dashboard designed to provide geospatial insights into Terra Caribbean property listings for Barbados. It allows users to upload their property data (in Excel or CSV format), which is then processed, geocoded, and analyzed against various geospatial features fetched from OpenStreetMap (OSM). The results are presented through an interactive map, a price-distance chart, key statistics, and an exportable dataset.
+## 📍 Overview
 
-## ✨ Features
+This project is an interactive Streamlit dashboard designed for visualizing and analyzing Terra Caribbean property listings within Barbados. It leverages geospatial data to provide insights into property distribution, pricing, and proximity to key features like beaches and tourist attractions, all presented against an interactive terrain map of the island.
 
-* **Data Upload:** Easily upload property data via Excel (.xlsx) or CSV (.csv) files.
-* **Data Cleaning:** Automatically cleans and standardizes key data points like Parish names, property sizes (converting to sqft), and property types.
-* **Geospatial Integration:** Fetches and caches geospatial data for Barbados from OpenStreetMap, including:
-    * Parish boundaries.
-    * Beaches.
-    * Tourism-related points of interest.
-    * Key land features (parks, golf courses, schools, etc.).
-* **Fallback Data:** Includes an option to load parish boundaries from a local `barbados_parishes.geojson` file if OSM data fails.
-* **Geocoding:** Approximates property locations by matching them to their respective parish centroids.
-* **Spatial Analysis:** Calculates:
-    * Distance from each property to the nearest beach.
-    * Count of tourism points within a 2km radius of each property.
-* **Interactive Map (Folium):** Visualizes:
-    * Parish boundaries with tooltips.
-    * Key land features (parks, golf courses).
-    * Aggregated property summaries (count, types, avg. metrics) per parish via clickable markers.
-    * Toggleable layer for points of interest.
-* **Data Visualization (Matplotlib):** Generates a scatter plot showing the relationship between property prices and their distance to the nearest beach.
-* **Key Statistics:** Displays summary statistics across all analyzed properties.
-* **Data Export:** Allows users to download the enriched and analyzed property data as a CSV file.
-* **Console Logging:** Provides a log tab to monitor the analysis process and diagnose potential issues.
-* **Caching:** Uses Streamlit's caching mechanisms to speed up data loading and OSM fetches on subsequent runs.
+The application allows users to upload their property data (in Excel or CSV format) and automatically processes it, geocodes it to the parish level, performs basic spatial analysis, and displays the results through various interactive visualizations and data tables.
 
-## ⚙️ How it Works
+## ✨ Key Features
 
-1.  **Upload:** The user uploads a property data file via the Streamlit sidebar.
-2.  **Load & Clean:** The script reads the data using `pandas`, identifies key columns (Parish, Price, Type, Size, etc.), cleans parish names, converts sizes to square feet, standardizes property types, and extracts bedroom counts.
-3.  **Fetch GeoData:** `osmnx` is used to download boundaries, beaches, tourism points, and other features for Barbados from OpenStreetMap. If OSM parish data fails, it attempts to load from `barbados_parishes.geojson`.
-4.  **Geocode:** Properties are matched to their parish's cleaned name and assigned the parish centroid as their approximate location using `geopandas`.
-5.  **Analyze:** `geopandas` and `scipy.spatial.cKDTree` are used to calculate distances to beaches and proximity to tourism points.
-6.  **Visualize:**
-    * `folium` creates an interactive map, layering parishes, features, and property summary markers.
-    * `matplotlib` generates a scatter plot, saved as a temporary image for display.
-7.  **Display:** `Streamlit` presents the UI, including the sidebar, tabs for the map, chart, statistics, export, and console log.
+* **Interactive Terrain Map:** Utilizes `Folium` to display an interactive map centered on Barbados, featuring:
+    * Stamen Terrain base layer with optional Topographic and Light base maps.
+    * Overlay of Barbados Parish boundaries fetched from OpenStreetMap (OSM) or a local GeoJSON file.
+    * Markers for each parish center, displaying aggregated property summaries (counts, types, averages) on click.
+    * Optional layers for Key Land Features (parks, golf courses) and Tourism Points of Interest.
+* **Data Upload:** Supports `.xlsx` and `.csv` file uploads for property listings.
+* **Automated Data Cleaning:** Standardizes parish names and property types, and parses property sizes (acres/sqft).
+* **Parish-Level Geocoding:** Assigns properties to parishes and places them at the parish centroid for visualization.
+* **Spatial Analysis:**
+    * Calculates the approximate distance from each parish center to the nearest beach (using OSM data).
+    * Counts the number of tourism points within a 2km radius of each parish center.
+* **Data Visualization:**
+    * **Chart:** Scatter plot showing the relationship between property prices and distance to the beach, color-coded by parish.
+    * **Key Statistics:** A summary view of key metrics from the analyzed data.
+    * **Parish Summary Table:** A detailed table showing aggregated statistics for each parish.
+* **Data Export:** Allows users to download the analyzed and geocoded property data as a CSV file.
+* **Informational Tab:** Explains the data sources, calculation methods (including map projections and area calculations), unit conversions, and known limitations.
+* **Console Log:** Provides detailed logs of the analysis process for debugging and transparency.
 
-## 🚀 Installation & Setup
+## ⚙️ Technology Stack
 
-1.  **Prerequisites:**
-    * Python 3.8 or higher.
-    * It's recommended to use a virtual environment.
+* **Language:** Python 3.8+
+* **Web Framework:** Streamlit
+* **Data Handling:** Pandas
+* **Geospatial:** GeoPandas, OSMnx, Folium, Shapely, SciPy (cKDTree)
+* **Plotting:** Matplotlib
+* **Utilities:** NumPy, OpenPyXL (for Excel reading)
 
-2.  **Clone the Repository (or save the script):**
+## 📂 Project Structure
+. ├── app.py # Main Streamlit application script ├── barbados_parishes.geojson # (Optional) Fallback GeoJSON ├── requirements.txt # List of Python dependencies └── README.md # This file
+
+
+## 💾 Data Requirements
+
+The application requires an input file (Excel or CSV) with property listings. For best results, the file should contain the following columns (case-insensitive, common variations handled):
+
+* **`Parish` (Required):** The parish where the property is located (e.g., "Saint Michael", "St. James", "Christ Church").
+* **`Price` (Required):** The listing price (numeric values, currency symbols/commas are handled).
+* **`Property Type`:** The type of property (e.g., "Residential", "House", "Commercial", "Land"). This is used for standardization.
+* **`Category`:** Listing type (e.g., "For Sale", "For Rent"). Used to differentiate sale/rent counts.
+* **`Size`:** The size of the property or lot. Should include units (e.g., "1.5 acres", "5000 sq ft"). If no unit is present, large numbers are assumed to be sq ft.
+* **`Description`:** Property description; used to attempt extracting the number of bedrooms.
+* **`Name`:** A name or title for the listing.
+
+## 🚀 Setup & Installation
+
+1.  **Clone the Repository (or download files):**
     ```bash
-    # If using git
-    git clone <repository_url>
-    cd <repository_directory>
-    # Or save the provided script as streamlit_app.py
+    git clone <your-repository-url>
+    cd <your-repository-directory>
+    ```
+    Or, simply save `app.py` (and optionally `barbados_parishes.geojson`) to a local folder.
+
+2.  **Create a Virtual Environment (Recommended):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
     ```
 
 3.  **Install Dependencies:**
+    * **Using `conda` (Highly Recommended for Geopandas):**
+        ```bash
+        conda create -n terra_env python=3.9
+        conda activate terra_env
+        conda install -c conda-forge geopandas osmnx folium streamlit pandas matplotlib openpyxl scipy
+        ```
+    * **Using `pip`:** Create a `requirements.txt` file:
+        ```txt
+        streamlit
+        pandas
+        geopandas
+        osmnx
+        folium
+        matplotlib
+        numpy
+        openpyxl
+        scipy
+        ```
+        Then run:
+        ```bash
+        pip install -r requirements.txt
+        ```
+        *If you encounter issues with `geopandas` via pip, consult the [official Geopandas installation guide](https://geopandas.org/en/stable/getting_started/install.html) for platform-specific instructions.*
+
+4.  **(Optional) Add GeoJSON:** If you want a local fallback for parish boundaries, place `barbados_parishes.geojson` in the same directory as `app.py`.
+
+## 📈 Usage
+
+1.  **Navigate to your project directory** in your terminal.
+2.  **Activate your virtual environment** (if you created one).
+3.  **Run the Streamlit application:**
     ```bash
-    pip install streamlit pandas geopandas osmnx folium shapely scipy matplotlib numpy Pillow openpyxl
+    streamlit run app.py
     ```
-    *Note: Installing `geopandas` can sometimes be complex due to its underlying C libraries (GEOS, GDAL, PROJ). Using Conda or pre-compiled wheels might be easier depending on your OS.*
+4.  The application will open in your web browser.
+5.  Use the **sidebar** to **upload** your property data file (`.xlsx` or `.csv`).
+6.  Click the "**🚀 Run Analysis**" button.
+7.  Wait for the analysis to complete.
+8.  Explore the results using the **tabs**.
 
-4.  **(Optional) Add Local Parish Data:**
-    * If you have a `barbados_parishes.geojson` file, place it in the same directory as `streamlit_app.py`. This serves as a backup if OpenStreetMap parish data cannot be fetched.
+## ⚠️ Notes & Limitations
 
-5.  **Run the App:**
-    ```bash
-    streamlit run streamlit_app.py
-    ```
-    This will start the Streamlit server and open the application in your default web browser.
+* **Geocoding:** Property locations are based on the **centroid (center point) of their respective parish**. This is an approximation.
+* **Data Source:** Geospatial data is primarily sourced from **OpenStreetMap (OSM)**; accuracy depends on OSM contributors.
+* **Calculations:** Area/distance calculations use the `EPSG:32620` (UTM Zone 20N) projection and are approximate.
+* **Performance:** The initial run might be slower due to data downloading and caching.
 
-## 📋 Input Data Format
+## 🔮 Future Enhancements
 
-The application accepts Excel (`.xlsx`) or CSV (`.csv`) files. For best results, your file should include the following columns (the script attempts to map common variations):
-
-* **Parish** (Required): The parish where the property is located (e.g., 'Saint Michael', 'Christ Church').
-* **Price** (Required): The listing price (numeric values or strings with currency symbols/commas).
-* **Property Type:** (e.g., 'House', 'Land', 'Office', 'Apartment'). This is standardized into 'Residential', 'Commercial', 'Land', or 'Other'.
-* **Size:** The size of the property (e.g., '5,000 sq ft', '2 acres'). This is converted to square feet.
-* **Description:** A text description, used to extract the number of bedrooms.
-* **Category:** Typically 'For Sale' or 'For Rent'.
-* **Name:** The name or title of the listing.
-
-*The script is robust but works best with clearly named columns and consistent data.*
-
-## 📊 Output
-
-The application provides the following outputs through different tabs:
-
-* **Map:** An interactive map of Barbados showing property insights.
-* **Chart:** A scatter plot visualizing price vs. beach distance.
-* **Key Statistics:** A list of important summary metrics.
-* **Export Data:** A download button for the analyzed data in CSV format, including calculated metrics and coordinates.
-* **Console Log:** A text area showing detailed logs from the analysis run.
-
-## 📦 Dependencies
-
-* `streamlit`
-* `pandas`
-* `geopandas`
-* `osmnx`
-* `folium`
-* `shapely`
-* `scipy`
-* `matplotlib`
-* `numpy`
-* `Pillow`
-* `openpyxl`
-* `unicodedata`
-* `re`
+* Implement address-level geocoding.
+* Add more interactive charts and filtering.
+* Incorporate historical property data analysis.
+* Integrate official data layers (zoning, etc.).
+* Improve input data validation.
 
 ## 🌍 Data Sources
 
@@ -118,5 +135,5 @@ The application provides the following outputs through different tabs:
 ## 🙏 Credits
 
 * **Author:** Matthew Blackman
-* **AI Assistance:** Google AI (for code assistance and documentation).
+* **AI Assistance:** Google AI
 * **Data Providers:** Terra Caribbean, OpenStreetMap Contributors.
