@@ -1,6 +1,6 @@
-# streamlit_app.py
+# app.py
 # -*- coding: utf-8 -*-
-"""Terra Caribbean Property Dashboard - Streamlit Version"""
+"""Terra Caribbean Property Intelligence:Geospatial View - Streamlit Version"""
 
 import streamlit as st
 import pandas as pd
@@ -8,7 +8,6 @@ import geopandas as gpd
 import osmnx as ox
 import folium
 from shapely.geometry import Point
-from shapely.ops import unary_union
 from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,16 +18,16 @@ import os
 import traceback
 import unicodedata
 import re
+import datetime
 
 # OSMnx settings
 ox.settings.log_console = False
 ox.settings.use_cache = True
 ox.settings.timeout = 600
 
-# --- Helper functions that were part of the class, now can be top-level or static ---
-# These helpers don't rely on 'self' beyond calling other helpers that also don't.
+# --- Helper functions ---
 
-def parse_size_to_sqft_static(size_str): # Made static
+def parse_size_to_sqft_static(size_str):
     if pd.isna(size_str) or not isinstance(size_str, str): return np.nan
     size_str_l = size_str.lower(); num_match = re.search(r'([\d,]+\.?\d*)\s*(.*)', size_str_l)
     if not num_match: return np.nan
@@ -36,26 +35,57 @@ def parse_size_to_sqft_static(size_str): # Made static
     except ValueError: return np.nan
     if 'acre' in unit_str: return num_val * 43560
     if ('sq' in unit_str and ('ft' in unit_str or 'feet' in unit_str)) or 'sf' in unit_str: return num_val
-    if unit_str == "" and num_val > 200: return num_val
+    if unit_str == "" and num_val > 200: return num_val # Assume sqft if no unit and large number
     return np.nan
 
-def standardize_property_type_static(pt_series_input): # Made static
+def standardize_property_type_static(pt_series_input):
     if not isinstance(pt_series_input, pd.Series):
         if isinstance(pt_series_input, str):
             pt_series_input = pd.Series([pt_series_input])
         else:
-            return pt_series_input
-    pt_series = pt_series_input.fillna('nan_placeholder').astype(str).str.lower(); standardized_values = np.full(len(pt_series), 'Other', dtype=object)
-    com_mask = pt_series.str.contains(r'office|industrial|retail|shop|warehouse|business|hotel|restaurant|bar|showroom|plaza|mall|factory|plant|commercial bldg|comm bldg|comm\. bldg',na=False, regex=True)
-    com_mask |= pt_series.str.contains(r'commercial', na=False, regex=False)
-    res_mask = pt_series.str.contains(r'house|home|villa|apartment|condo|townhouse|dwelling|bungalow|chalet|duplex|residential unit|resi unit|block of flats',na=False, regex=True)
-    res_mask |= (pt_series.str.contains(r'residential', na=False, regex=False) & ~com_mask)
-    land_mask = pt_series.str.contains(r'land|lot', na=False, regex=False) & ~com_mask & ~res_mask
-    standardized_values[com_mask] = 'Commercial'; standardized_values[res_mask] = 'Residential'; standardized_values[land_mask] = 'Land'
-    standardized_values[pt_series.isin(['', 'unknown', 'nan', 'n/a', '-', 'nan_placeholder', 'other'])] = 'Other'
-    return pd.Series(standardized_values, index=pt_series_input.index)
+            return pd.Series(pt_series_input, dtype=object)
 
-def clean_parish_name_generic_static(name_val): # Made static
+    pt_series_clean = pt_series_input.fillna("").astype(str).str.lower().str.strip()
+    standardized_values = pd.Series(['Other'] * len(pt_series_clean), index=pt_series_input.index, dtype=object)
+
+    standardized_values.loc[pt_series_clean == 'residential'] = 'Residential'
+    standardized_values.loc[pt_series_clean == 'commercial'] = 'Commercial'
+    standardized_values.loc[pt_series_clean == 'land'] = 'Land'
+    standardized_values.loc[pt_series_clean == 'lot'] = 'Land'
+
+    res_keywords = [
+        'house', 'home', 'villa', 'apartment', 'condo', 'townhouse',
+        'dwelling', 'bungalow', 'chalet', 'duplex', 'resi unit',
+        'flat', 'cottage', 'terrace', 'maisonette', 'penthouse', 'studio'
+    ]
+    com_keywords = [
+        'office', 'industrial', 'retail', 'shop', 'warehouse', 'business',
+        'hotel', 'restaurant', 'bar', 'showroom', 'plaza', 'mall',
+        'factory', 'plant', 'comm bldg', 'comm. bldg',
+        'store', 'center', 'centre', 'complex'
+    ]
+    land_keywords_fallback = ['plot', 'acre', 'field', 'farm', 'ground']
+
+    res_pattern = r'\b(' + '|'.join(res_keywords) + r')\b'
+    com_pattern = r'\b(' + '|'.join(com_keywords) + r')\b'
+    land_pattern_fallback = r'\b(' + '|'.join(land_keywords_fallback) + r')\b'
+
+    mask_res_fallback = pt_series_clean.str.contains(res_pattern, na=False, regex=True) & (standardized_values == 'Other')
+    standardized_values.loc[mask_res_fallback] = 'Residential'
+
+    mask_com_fallback = pt_series_clean.str.contains(com_pattern, na=False, regex=True) & (standardized_values == 'Other')
+    standardized_values.loc[mask_com_fallback] = 'Commercial'
+
+    mask_land_fallback = pt_series_clean.str.contains(land_pattern_fallback, na=False, regex=True) & (standardized_values == 'Other')
+    standardized_values.loc[mask_land_fallback] = 'Land'
+
+    other_strings = ['', 'unknown', 'nan', 'n/a', '-', 'other', 'none']
+    standardized_values.loc[pt_series_clean.isin(other_strings)] = 'Other'
+
+    return standardized_values
+
+
+def clean_parish_name_generic_static(name_val):
     if pd.isna(name_val): return None
     s = str(name_val).strip()
     if not s or s.lower() in ['nan', 'none']: return None
@@ -70,7 +100,6 @@ def clean_parish_name_generic_static(name_val): # Made static
     return cleaned_s.strip().replace('  ', ' ')
 
 
-# --- Cached Data Loading Functions (now outside the class or static) ---
 @st.cache_data(show_spinner=False, persist="disk")
 def load_cached_property_data(file_content_bytes, filename_for_log, log_capture_list_ref):
     log_capture_list_ref.append(f"Executing load_cached_property_data for {filename_for_log}...\n")
@@ -113,7 +142,7 @@ def load_cached_property_data(file_content_bytes, filename_for_log, log_capture_
         for col_check in ['Category', 'Property Type']:
             if col_check not in df.columns: df[col_check] = 'Other'
         df['Property Type Standardized'] = standardize_property_type_static(df['Property Type'])
-        df['Category'].fillna('Unknown', inplace=True)
+        df['Category'] = df['Category'].fillna('Unknown').astype(str).str.strip()
         final_columns = [c for c in ['Name','Parish','Property Type','Property Type Standardized','Price','Bedrooms','Category','Size_sqft','original_index'] if c in df.columns]
         return df[final_columns].copy()
     except Exception as e: log_capture_list_ref.append(f"Error loading property data: {e}\n{traceback.format_exc()}\n"); return pd.DataFrame()
@@ -202,9 +231,8 @@ def get_cached_alternative_parish_data(log_capture_list_ref):
         final_alt_cols = ['name', 'OSM_Parish_Name', 'geometry']; existing_final_cols = [col for col in final_alt_cols if col in parishes_alt.columns]
         for col_ensure in ['name', 'OSM_Parish_Name']:
             if col_ensure not in parishes_alt.columns: parishes_alt[col_ensure] = pd.Series([None] * len(parishes_alt), index=parishes_alt.index); existing_final_cols.append(col_ensure)
-        return parishes_alt[existing_alt_cols]
+        return parishes_alt[existing_final_cols]
     except Exception as e: log_capture_list_ref.append(f"Error alt parish data: {e}\n{traceback.format_exc()}\n"); return parishes_alt
-
 
 class TerraDashboardLogic:
     def __init__(self, uploaded_file_object=None):
@@ -219,6 +247,7 @@ class TerraDashboardLogic:
         self.log_capture = []
         self.raw_parishes_from_osm = gpd.GeoDataFrame()
         self.uploaded_file_object = uploaded_file_object
+        self.parish_summary_df = pd.DataFrame()
 
     def _capture_print(self, message):
         self.log_capture.append(str(message) + "\n")
@@ -248,6 +277,13 @@ class TerraDashboardLogic:
             if properties.empty: self._capture_print("No properties loaded. Aborting."); return False
             self._capture_print(f"\nLoaded and initially processed {len(properties)} properties")
 
+            if 'Property Type Standardized' in properties.columns:
+                self._capture_print("\nCounts of 'Property Type Standardized' after loading:")
+                self._capture_print(str(properties['Property Type Standardized'].value_counts(dropna=False).to_string()))
+            if 'Category' in properties.columns:
+                self._capture_print("\nCounts of 'Category' after loading:")
+                self._capture_print(str(properties['Category'].value_counts(dropna=False).to_string()))
+
             self._capture_print("\nDownloading/Loading geospatial data...")
             primary_parishes, self.beaches, self.tourism_points, self.feature_polygons = self._get_geodata()
 
@@ -269,56 +305,27 @@ class TerraDashboardLogic:
                         self.parishes['OSM_Parish_Name'] = self.parishes['name'].copy(); self.parishes['OSM_Parish_Name'] = self.parishes['OSM_Parish_Name'].replace(problematic_strings_to_none, None, regex=False)
                     else: self.parishes['OSM_Parish_Name'] = pd.Series([None] * len(self.parishes), index=self.parishes.index)
                 if 'name' in self.parishes.columns: self.parishes['OSM_Parish_Name'] = self.parishes['OSM_Parish_Name'].fillna(self.parishes['name'])
-                self.parishes['OSM_Parish_Name'] = self.parishes['OSM_Parish_Name'].fillna('Parish Name N/A')
-                self.parishes['OSM_Parish_Name'] = self.parishes['OSM_Parish_Name'].astype(str)
-                unique_osm_display_names = sorted(list(self.parishes['OSM_Parish_Name'].unique()))
-                self._capture_print(f"DEBUG: Final unique parish names for map display: {unique_osm_display_names}")
-                if "nan" in unique_osm_display_names or "Nan" in unique_osm_display_names: self._capture_print("CRITICAL DEBUG: 'nan' or 'Nan' string still present!")
-                if not self.raw_parishes_from_osm.empty:
-                    parishes_displayed_as_na = self.parishes[self.parishes['OSM_Parish_Name'] == 'Parish Name N/A']
-                    if not parishes_displayed_as_na.empty:
-                        self._capture_print("\n-------------------------------------------------------------------------------")
-                        self._capture_print(f"DIAGNOSTIC REPORT: {len(parishes_displayed_as_na)} Parish(es) are Displaying as 'Parish Name N/A'")
-                        self._capture_print("  The following details show raw tags from the initial OSM data fetch for these parishes.")
-                        self._capture_print("-------------------------------------------------------------------------------")
-                        name_preference_checked = ['name', 'official_name', 'name:en', 'alt_name', 'loc_name']
-                        for parish_table_index, processed_parish_row in parishes_displayed_as_na.iterrows():
-                            if parish_table_index in self.raw_parishes_from_osm.index:
-                                raw_data_entry = self.raw_parishes_from_osm.loc[parish_table_index]; raw_data_row_series = None
-                                if isinstance(raw_data_entry, pd.DataFrame):
-                                    if not raw_data_entry.empty: raw_data_row_series = raw_data_entry.iloc[0]
-                                    else: self._capture_print(f"\n  Parish (Index: {parish_table_index}): WARNING: Raw data lookup yielded empty DataFrame."); continue
-                                elif isinstance(raw_data_entry, pd.Series): raw_data_row_series = raw_data_entry
-                                else: self._capture_print(f"\n  Parish (Index: {parish_table_index}): WARNING: Unexpected raw data type {type(raw_data_entry)}."); continue
-                                element_type = raw_data_row_series.get('element_type', 'unknown'); osm_id_val = parish_table_index
-                                id_str_parts = [f"Index/OSMID: {osm_id_val}", f"Type: {element_type}"]
-                                if 'osmid' in raw_data_row_series and pd.notna(raw_data_row_series['osmid']) and str(raw_data_row_series['osmid']) != str(osm_id_val): id_str_parts.append(f"osmid_col: {raw_data_row_series['osmid']}")
-                                self._capture_print(f"\n  Parish -> OSM Info ({', '.join(id_str_parts)})")
-                                self._capture_print(f"    Final Display Name in Map: {processed_parish_row['OSM_Parish_Name']}")
-                                self._capture_print(f"    Cleaned Matching Name ('name' col): {processed_parish_row.get('name', 'N/A')}")
-                                self._capture_print("    Analysis of Preferred OSM Name Tags (Raw Values from Source):")
-                                found_any_pref = False
-                                for pref_tag in name_preference_checked:
-                                    raw_val = raw_data_row_series.get(pref_tag)
-                                    if pd.notna(raw_val) and str(raw_val).strip() not in ['', 'nan', 'NaN', 'Nan', 'none', 'None', 'null', 'NULL', '<NA>']:
-                                        self._capture_print(f"      - Tag '{pref_tag}': '{raw_val}' (Usable)"); found_any_pref = True
-                                    else: self._capture_print(f"      - Tag '{pref_tag}': '{raw_val}' (Missing/Problematic)")
-                                if not found_any_pref: self._capture_print("    -> Conclusion: No usable name in preferred OSM tags.")
-                                else: self._capture_print("    -> Conclusion for Preferred Tags: At least one preferred OSM name tag had a usable value (see above).")
-                                self._capture_print("    Other Non-Empty Raw OSM Tags:"); other_tags_found = False
-                                for col, val in raw_data_row_series.items():
-                                    is_val_meaningful = False
-                                    if isinstance(val, list):
-                                        if val and any(str(x).strip() != '' for x in val if pd.notna(x)): is_val_meaningful = True
-                                    elif pd.notna(val) and str(val).strip() != '': is_val_meaningful = True
-                                    if col not in ['geometry', 'nodes', 'ways', 'element_type', 'osmid'] + name_preference_checked and is_val_meaningful:
-                                        self._capture_print(f"      - {col}: {val}"); other_tags_found = True
-                                if not other_tags_found: self._capture_print("      -> No other significant raw tags.")
-                            else: self._capture_print(f"\n  Parish (Index: {parish_table_index}): Final Name: {processed_parish_row['OSM_Parish_Name']}. WARNING: Raw data not found for this index.")
-                        self._capture_print("-------------------------------------------------------------------------------")
-                else: self._capture_print("\nDIAGNOSTIC: Raw parish info from OSM (self.raw_parishes_from_osm) is empty.")
-                if 'name' in self.parishes.columns: self.parishes['name'] = self.parishes['name'].fillna('Unknown Cleaned Name').astype(str)
-            else: self._capture_print("No parish data was loaded; skipping parish name processing.")
+                self.parishes['OSM_Parish_Name'] = self.parishes['OSM_Parish_Name'].fillna('Parish Name N/A').astype(str)
+
+                if 'geometry' in self.parishes.columns:
+                    if not isinstance(self.parishes, gpd.GeoDataFrame):
+                        self.parishes = gpd.GeoDataFrame(self.parishes, geometry='geometry', crs="EPSG:4326")
+                    try:
+                        if self.parishes.crs is None: self.parishes.set_crs("EPSG:4326", inplace=True)
+                        parishes_projected = self.parishes.to_crs("EPSG:32620") # UTM Zone 20N for Barbados
+                        self.parishes['area_sqkm'] = parishes_projected.geometry.area / 1_000_000
+                        self._capture_print("Calculated parish areas (sq km).")
+                    except Exception as e:
+                        self._capture_print(f"Error projecting parishes for area calculation: {e}")
+                        self.parishes['area_sqkm'] = np.nan
+                else:
+                    self.parishes['area_sqkm'] = np.nan
+            else:
+                self._capture_print("No parish data was loaded; skipping parish name processing and area calculation.")
+                if not self.parishes.empty: # Ensure column exists
+                    self.parishes['area_sqkm'] = np.nan
+
+
             if not self.feature_polygons.empty: self._capture_print(f"Fetched {len(self.feature_polygons)} feature polygons.")
             self._capture_print("\nGeocoding properties...");
             geo_properties = self.geocode_properties_internal(properties, self.parishes.copy())
@@ -334,6 +341,7 @@ class TerraDashboardLogic:
             self._capture_print("\n=== Analysis complete! ===")
             self._capture_print(f"Final # of properties in analysis: {len(self.analyzed_properties)}")
             return True
+
         except Exception as e:
             self._capture_print(f"\nERROR during analysis: {str(e)}");
             self._capture_print(traceback.format_exc())
@@ -341,9 +349,6 @@ class TerraDashboardLogic:
 
     def parse_size_to_sqft(self, size_str):
         return parse_size_to_sqft_static(size_str)
-
-    def standardize_property_type(self, pt_series_input):
-        return standardize_property_type_static(pt_series_input)
 
     def _clean_parish_name_generic(self, name_val):
         return clean_parish_name_generic_static(name_val)
@@ -355,25 +360,56 @@ class TerraDashboardLogic:
             if 'geometry' not in parishes_gdf.columns or parishes_gdf['geometry'].isna().all(): self._capture_print("CRIT: Parish GDF for geocoding has no valid geometries."); return gpd.GeoDataFrame()
             if parishes_gdf['geometry'].isna().any(): parishes_gdf.dropna(subset=['geometry'], inplace=True)
             if parishes_gdf.empty: self._capture_print("CRIT: All parish geometries were null after dropna."); return gpd.GeoDataFrame()
+
             def create_join_key(s): return s.astype(str).str.lower().str.replace(r'[^a-z0-9\s]','',regex=True).str.replace(r'\s+',' ',regex=True).str.strip()
             df_props['Parish_join_key'] = create_join_key(df_props['Parish'])
-            if 'name' not in parishes_gdf.columns: self._capture_print("CRIT ERROR in geocode_properties: 'name' column missing in parishes_gdf."); return gpd.GeoDataFrame()
-            parishes_gdf['name_join_key'] = create_join_key(parishes_gdf['name'])
+
+            if 'name' not in parishes_gdf.columns:
+                self._capture_print("WARN: 'name' column (cleaned for join) missing in parishes_gdf. Attempting join with OSM_Parish_Name if available.")
+                if 'OSM_Parish_Name' in parishes_gdf.columns:
+                    parishes_gdf['name_join_key'] = create_join_key(parishes_gdf['OSM_Parish_Name'])
+                else:
+                    self._capture_print("CRIT ERROR: No suitable join key ('name' or 'OSM_Parish_Name') in parishes_gdf."); return gpd.GeoDataFrame()
+            else:
+                 parishes_gdf['name_join_key'] = create_join_key(parishes_gdf['name'])
+
             parishes_gdf.drop_duplicates(subset=['name_join_key'], keep='first', inplace=True)
-            gdf_merged = pd.merge(df_props, parishes_gdf[['name_join_key','OSM_Parish_Name','geometry']], left_on='Parish_join_key', right_on='name_join_key', how='left', indicator=True)
+
+            cols_to_merge = ['name_join_key','OSM_Parish_Name','geometry']
+            if 'area_sqkm' in parishes_gdf.columns:
+                cols_to_merge.append('area_sqkm')
+
+            gdf_merged = pd.merge(df_props, parishes_gdf[cols_to_merge], left_on='Parish_join_key', right_on='name_join_key', how='left', indicator=True)
             gdf_matched = gdf_merged[gdf_merged['geometry'].notna()].copy()
+
             if gdf_matched.empty and not df_props.empty: self._capture_print("CRIT: No properties could be matched to parish geometries after merge."); return gpd.GeoDataFrame()
-            gdf_matched = gpd.GeoDataFrame(gdf_matched, geometry='geometry', crs=parishes_gdf.crs); gdf_matched['geometry'] = gdf_matched.geometry.centroid
+            gdf_matched = gpd.GeoDataFrame(gdf_matched, geometry='geometry', crs=parishes_gdf.crs)
+
+            if gdf_matched.crs is None:
+                gdf_matched.set_crs("EPSG:4326", inplace=True)
+
+            projected_crs = "EPSG:32620"
+            try:
+                gdf_matched_projected = gdf_matched.to_crs(projected_crs)
+                gdf_matched['geometry'] = gdf_matched_projected.geometry.centroid.to_crs(gdf_matched.crs)
+            except Exception as e:
+                self._capture_print(f"WARN: Error projecting for centroid calculation, using geographic CRS: {e}")
+                gdf_matched['geometry'] = gdf_matched.geometry.centroid
+
             gdf_matched.drop(columns=['_merge', 'name_join_key'], inplace=True, errors='ignore')
+
             return gdf_matched
         except Exception as e: self._capture_print(f"Error during geocoding: {str(e)}\n{traceback.format_exc()}"); return gpd.GeoDataFrame()
 
     def analyze_properties_internal(self, prop_gdf_in, beaches_in, tourism_points_in):
-        prop_gdf = prop_gdf_in.copy(); beaches_gdf = beaches_in.copy() if beaches_in is not None and not beaches_in.empty else gpd.GeoDataFrame(); tourism_gdf = tourism_points_in.copy() if tourism_points_in is not None and not tourism_points_in.empty else gpd.GeoDataFrame()
+        prop_gdf = prop_gdf_in.copy();
+        beaches_gdf = beaches_in.copy() if beaches_in is not None and not beaches_in.empty else gpd.GeoDataFrame();
+        tourism_gdf = tourism_points_in.copy() if tourism_points_in is not None and not tourism_points_in.empty else gpd.GeoDataFrame()
         try:
             if prop_gdf.empty: return gpd.GeoDataFrame()
             if prop_gdf.crs is None: prop_gdf.set_crs("EPSG:4326",inplace=True)
-            analysis_crs="EPSG:2006"; prop_proj = prop_gdf.to_crs(analysis_crs)
+            analysis_crs="EPSG:32620"; # Using UTM Zone 20N for Barbados distance calculations
+            prop_proj = prop_gdf.to_crs(analysis_crs)
             prop_proj['beach_dist_m']=np.nan; prop_proj['tourism_count_2km']=0
             if not beaches_gdf.empty:
                 if beaches_gdf.crs is None: beaches_gdf.set_crs("EPSG:4326",inplace=True)
@@ -385,8 +421,8 @@ class TerraDashboardLogic:
                         elif geom.geom_type=='LineString': coords.extend(list(geom.coords))
                         elif geom.geom_type=='Polygon': coords.extend(list(geom.exterior.coords)); [coords.extend(list(i.coords)) for i in geom.interiors]
                     if coords:
-                        prop_points_for_tree = prop_proj.to_crs(beaches_proj.crs) if prop_proj.crs != beaches_proj.crs else prop_proj
-                        distances, _ = cKDTree(list(set(coords))).query([(g.x,g.y) for g in prop_points_for_tree.geometry],k=1)
+                        prop_points_for_tree = prop_proj.geometry.apply(lambda g: (g.x, g.y))
+                        distances, _ = cKDTree(list(set(coords))).query(list(prop_points_for_tree),k=1)
                         prop_proj['beach_dist_m'] = distances
             if not tourism_gdf.empty:
                 if tourism_gdf.crs is None: tourism_gdf.set_crs("EPSG:4326",inplace=True)
@@ -409,15 +445,23 @@ class TerraDashboardLogic:
         tourism_points = tourism_points_in.copy() if tourism_points_in is not None and not tourism_points_in.empty else gpd.GeoDataFrame()
         try:
             if analyzed_gdf.empty and all_parishes_gdf.empty and feature_polygons.empty and tourism_points.empty: self._capture_print("No data available to create visualizations."); return
-            m = folium.Map(location=[13.1939, -59.5432], zoom_start=10, tiles="CartoDB positron")
+
+            stamen_terrain_attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>, under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>. Data by <a href="http://openstreetmap.org">OpenStreetMap</a>, under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.'
+            open_topo_map_attribution = 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="http://viewfinderpanoramas.org">SRTM</a> | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)'
+            carto_positron_attribution = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+
+            m = folium.Map(location=[13.1939, -59.5432], zoom_start=10, tiles="Stamen Terrain", attr=stamen_terrain_attribution)
+            folium.TileLayer("OpenTopoMap", name="Topographic Detail", show=False, attr=open_topo_map_attribution).add_to(m)
+            folium.TileLayer("CartoDB positron", name="Light Base Map", show=False, attr=carto_positron_attribution).add_to(m)
+
             if not all_parishes_gdf.empty and 'OSM_Parish_Name' in all_parishes_gdf.columns and 'geometry' in all_parishes_gdf.columns:
                 parishes_4326 = all_parishes_gdf.to_crs("EPSG:4326")[all_parishes_gdf.geometry.is_valid & all_parishes_gdf.geometry.notna()]
                 if not parishes_4326.empty:
                     parish_boundary_layer = folium.FeatureGroup(name="Parish Boundaries & Centers", show=True).add_to(m)
                     folium.GeoJson(parishes_4326,style_function=lambda x: {'fillColor':'#D3D3D3','color':'#333333','weight':1.5,'fillOpacity':0.3},
-                                   highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
-                                   tooltip=folium.GeoJsonTooltip(fields=['OSM_Parish_Name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
-                                  ).add_to(parish_boundary_layer)
+                                     highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
+                                     tooltip=folium.GeoJsonTooltip(fields=['OSM_Parish_Name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
+                                   ).add_to(parish_boundary_layer)
                     for idx, parish_row in parishes_4326.iterrows():
                         name = parish_row['OSM_Parish_Name']
                         try:
@@ -426,53 +470,96 @@ class TerraDashboardLogic:
                             if centroid.is_empty: continue
                             folium.CircleMarker(location=[centroid.y, centroid.x], radius=3, color='#4A4A4A', weight=1, fill=True, fill_color='#808080', fill_opacity=0.5, tooltip=f"<b>{name}</b> (Center)").add_to(parish_boundary_layer)
                         except Exception: pass
+
             if not feature_polygons.empty and 'name' in feature_polygons.columns and 'geometry' in feature_polygons.columns:
                 feature_polygons_4326 = feature_polygons.to_crs("EPSG:4326")[feature_polygons.geometry.is_valid & feature_polygons.geometry.notna()]
                 if not feature_polygons_4326.empty:
                     def get_feature_style(props):
                         style = {'fillOpacity': 0.4, 'weight': 1.5, 'color': 'grey'}; leisure = props.get('leisure'); amenity = props.get('amenity')
                         if leisure == 'park': style.update({'fillColor': '#86C166', 'color': '#5E8C4A'})
-                        elif leisure == 'golf_course': style.update({'fillColor': '#A7D397', 'color': '#6A8A28'})
-                        elif leisure == 'nature_reserve': style.update({'fillColor': '#B8D8B8', 'color': '#7A9A7A'})
-                        elif amenity in ['university','college','school']: style.update({'fillColor': '#ADD8E6', 'color':'#5A97B0'})
                         return style
-                    feature_layer = folium.FeatureGroup(name="Key Land Features", show=True).add_to(m)
+                    feature_layer = folium.FeatureGroup(name="Key Land Features", show=False).add_to(m)
                     for _, row in feature_polygons_4326.iterrows():
                         single_feature_gdf = gpd.GeoDataFrame([row], crs=feature_polygons_4326.crs)
                         folium.GeoJson(single_feature_gdf, style_function=lambda x: get_feature_style(x['properties']),
                                        highlight_function=lambda x: {'weight': 3, 'color': 'black', 'fillOpacity': 0.6},
                                        tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Name:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=False)).add_to(feature_layer)
+
             if not analyzed_gdf.empty:
-                if 'Property Type Standardized' not in analyzed_gdf.columns: analyzed_gdf['Property Type Standardized'] = self.standardize_property_type(analyzed_gdf.get('Property Type', pd.Series(dtype=str)))
-                analyzed_gdf['Category'] = analyzed_gdf.get('Category', pd.Series(dtype=str)).astype(str).fillna('Unknown')
-                group_by_col = 'OSM_Parish_Name' if 'OSM_Parish_Name' in analyzed_gdf.columns else 'Parish'
-                if group_by_col in analyzed_gdf.columns:
+                if 'Property Type Standardized' not in analyzed_gdf.columns:
+                    analyzed_gdf['Property Type Standardized'] = standardize_property_type_static(analyzed_gdf.get('Property Type', pd.Series(dtype=str)))
+
+                analyzed_gdf['Category'] = analyzed_gdf.get('Category', pd.Series(dtype=str)).fillna('Unknown').astype(str).str.strip()
+                analyzed_gdf['Property Type Standardized'] = analyzed_gdf.get('Property Type Standardized', pd.Series(dtype=str)).fillna('Other').astype(str).str.strip()
+
+                group_by_col = 'OSM_Parish_Name' if 'OSM_Parish_Name' in analyzed_gdf.columns and analyzed_gdf['OSM_Parish_Name'].notna().any() else 'Parish'
+
+                if group_by_col in analyzed_gdf.columns and analyzed_gdf[group_by_col].notna().any():
                     parish_summary_layer = folium.FeatureGroup(name="Property Summaries by Parish", show=True).add_to(m)
-                    parish_summary = analyzed_gdf.groupby(group_by_col).agg(
-                        total_properties=('Name', 'count'), for_sale_residential_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() != 'FOR RENT') & (x == 'Residential')).sum()),
-                        for_sale_commercial_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() != 'FOR RENT') & (x == 'Commercial')).sum()), for_sale_land_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() != 'FOR RENT') & (x == 'Land')).sum()),
-                        for_sale_other_std_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() != 'FOR RENT') & (x == 'Other')).sum()), for_rent_residential_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() == 'FOR RENT') & (x == 'Residential')).sum()),
-                        for_rent_commercial_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() == 'FOR RENT') & (x == 'Commercial')).sum()), for_rent_land_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() == 'FOR RENT') & (x == 'Land')).sum()),
-                        for_rent_other_std_count=('Property Type Standardized', lambda x: ((analyzed_gdf.loc[x.index, 'Category'].str.upper() == 'FOR RENT') & (x == 'Other')).sum()), total_for_sale = ('Category', lambda x_cat: (x_cat.str.upper() != 'FOR RENT').sum()),
-                        total_for_rent = ('Category', lambda x_cat: (x_cat.str.upper() == 'FOR RENT').sum()), avg_beach_dist_m=('beach_dist_m','mean'), avg_tourism_count_2km=('tourism_count_2km','mean'),
-                        avg_size_sqft=('Size_sqft','mean'), latitude=('geometry',lambda g: g.iloc[0].y if not g.empty and hasattr(g.iloc[0], 'y') else np.nan), longitude=('geometry',lambda g: g.iloc[0].x if not g.empty and hasattr(g.iloc[0], 'x') else np.nan),
-                    ).reset_index()
+
+                    def summarize_parish(group):
+                        data = {}
+                        category = group['Category']
+                        prop_type = group['Property Type Standardized']
+                        data['total_properties'] = int(len(group))
+                        is_sale = category.str.upper() != 'FOR RENT'
+                        is_rent = category.str.upper() == 'FOR RENT'
+                        is_res = prop_type == 'Residential'
+                        is_com = prop_type == 'Commercial'
+                        is_land = prop_type == 'Land'
+                        is_oth = prop_type == 'Other'
+                        data['for_sale_residential_count'] = int((is_sale & is_res).sum())
+                        data['for_rent_residential_count'] = int((is_rent & is_res).sum())
+                        data['for_sale_commercial_count'] = int((is_sale & is_com).sum())
+                        data['for_rent_commercial_count'] = int((is_rent & is_com).sum())
+                        data['for_sale_land_count'] = int((is_sale & is_land).sum())
+                        data['for_rent_land_count'] = int((is_rent & is_land).sum())
+                        data['for_sale_other_std_count'] = int((is_sale & is_oth).sum())
+                        data['for_rent_other_std_count'] = int((is_rent & is_oth).sum())
+                        data['total_for_sale'] = int(is_sale.sum())
+                        data['total_for_rent'] = int(is_rent.sum())
+                        data['avg_beach_dist_m'] = group['beach_dist_m'].mean()
+                        data['avg_tourism_count_2km'] = group['tourism_count_2km'].mean()
+                        data['avg_size_sqft'] = group['Size_sqft'].mean()
+                        data['area_sqkm'] = group['area_sqkm'].iloc[0] if 'area_sqkm' in group.columns and not group['area_sqkm'].empty and pd.notna(group['area_sqkm'].iloc[0]) else np.nan
+                        if not group.empty and 'geometry' in group.columns and group['geometry'].iloc[0] is not None:
+                            first_geom = group['geometry'].iloc[0]
+                            data['latitude'] = first_geom.y if hasattr(first_geom, 'y') else np.nan
+                            data['longitude'] = first_geom.x if hasattr(first_geom, 'x') else np.nan
+                        else: data['latitude'], data['longitude'] = np.nan, np.nan
+                        return pd.Series(data)
+
+                    parish_summary = analyzed_gdf.groupby(group_by_col, dropna=False).apply(summarize_parish).reset_index()
+                    self.parish_summary_df = parish_summary.copy()
+
                     for _, p_row in parish_summary.iterrows():
                         if pd.isna(p_row['latitude']) or pd.isna(p_row['longitude']): continue
                         loc=[p_row['latitude'],p_row['longitude']]; fill_color='#FF4500'; radius=max(8,min(10+(p_row['total_properties']/12),35))
                         beach_km_str = f"{(p_row['avg_beach_dist_m']/1000):.1f} km" if pd.notna(p_row['avg_beach_dist_m']) else 'N/A'; avg_tour_str = f"{p_row['avg_tourism_count_2km']:.1f}" if pd.notna(p_row['avg_tourism_count_2km']) else "N/A"; avg_sz_str = f"{p_row['avg_size_sqft']:,.0f} sq ft" if pd.notna(p_row['avg_size_sqft']) else "N/A"
+                        area_val = p_row.get('area_sqkm')
+                        area_str = f"{area_val:.1f} sq km" if pd.notna(area_val) and area_val > 0 else "N/A"
+                        prop_density_str = "N/A"
+                        if pd.notna(area_val) and area_val > 0 and pd.notna(p_row['total_properties']) and p_row['total_properties'] > 0 :
+                            density = p_row['total_properties'] / area_val
+                            prop_density_str = f"{density:.1f} props/sq km"
+
                         popup_html = f"""
                         <div style="width:320px; font-family: Arial, sans-serif; font-size: 13px; line-height: 1.4;">
                             <h4 style="margin: 5px 0 10px 0; padding-bottom: 5px; border-bottom: 1px solid #ddd; color: #005A9C;">{p_row[group_by_col]} Summary</h4>
                             <table style="width: 100%; border-collapse: collapse;">
                                 <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Total Properties:</td><td style="padding: 4px; text-align: right;">{p_row['total_properties']}</td></tr>
+                                <tr><td style="padding: 4px; font-weight: bold;">Parish Area:</td><td style="padding: 4px; text-align: right;">{area_str}</td></tr>
+                                <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Property Density:</td><td style="padding: 4px; text-align: right;">{prop_density_str}</td></tr>
                                 <tr><td style="padding: 4px; font-weight: bold;">For Sale:</td><td style="padding: 4px; text-align: right;">{p_row['total_for_sale']}</td></tr>
                                 <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Residential:</td><td style="padding: 4px; text-align: right;">{p_row['for_sale_residential_count']}</td></tr>
                                 <tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Commercial:</td><td style="padding: 4px; text-align: right;">{p_row['for_sale_commercial_count']}</td></tr>
-                                <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Land:</td><td style="padding: 4px; text-align: right;">{p_row['for_sale_land_count']}</td></tr>
+                                <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Land:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_sale_land_count',0)}</td></tr>
+                                <tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Other:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_sale_other_std_count',0)}</td></tr>
                                 <tr><td style="padding: 4px; font-weight: bold;">For Rent:</td><td style="padding: 4px; text-align: right;">{p_row['total_for_rent']}</td></tr>
                                 <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Residential:</td><td style="padding: 4px; text-align: right;">{p_row['for_rent_residential_count']}</td></tr>
                                 <tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Commercial:</td><td style="padding: 4px; text-align: right;">{p_row['for_rent_commercial_count']}</td></tr>
+                                <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Land:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_rent_land_count',0)}</td></tr>
+                                <tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Other:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_rent_other_std_count',0)}</td></tr>
                                 <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Avg. Beach Dist:</td><td style="padding: 4px; text-align: right;">{beach_km_str}</td></tr>
                                 <tr><td style="padding: 4px; font-weight: bold;">Avg. Attractions (2km):</td><td style="padding: 4px; text-align: right;">{avg_tour_str}</td></tr>
                                 <tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Avg. Size:</td><td style="padding: 4px; text-align: right;">{avg_sz_str}</td></tr>
@@ -494,14 +581,17 @@ class TerraDashboardLogic:
             folium.LayerControl().add_to(m)
             self.map_html_content = m.get_root().render()
             self._capture_print(f"\nInteractive map data generated.")
+
             fig_chart, ax_chart = plt.subplots(figsize=(10,6))
             group_by_col_chart = 'OSM_Parish_Name' if 'OSM_Parish_Name' in analyzed_gdf.columns else 'Parish'
             unique_parishes_for_chart = sorted(analyzed_gdf[group_by_col_chart].unique()) if group_by_col_chart in analyzed_gdf and not analyzed_gdf.empty else []
             if unique_parishes_for_chart:
-                colors = plt.cm.get_cmap('viridis',len(unique_parishes_for_chart))
+                cmap = plt.cm.get_cmap('viridis', len(unique_parishes_for_chart))
+                colors = [cmap(i) for i in range(len(unique_parishes_for_chart))]
+
                 for i, p_name_chart in enumerate(unique_parishes_for_chart):
                     p_data = analyzed_gdf[analyzed_gdf[group_by_col_chart]==p_name_chart].dropna(subset=['beach_dist_m','Price'])
-                    if not p_data.empty: ax_chart.scatter(p_data['beach_dist_m']/1000, p_data['Price'], label=p_name_chart, alpha=0.65, s=45, color=colors(i))
+                    if not p_data.empty: ax_chart.scatter(p_data['beach_dist_m']/1000, p_data['Price'], label=p_name_chart, alpha=0.65, s=45, color=colors[i])
             ax_chart.set_title("Property Prices vs. Beach Distance by Parish",fontsize=14)
             ax_chart.set_xlabel("Distance to Nearest Beach (km)",fontsize=12)
             ax_chart.set_ylabel("Price (USD)",fontsize=12)
@@ -511,6 +601,7 @@ class TerraDashboardLogic:
                 self.chart_path = tmpfile_chart.name
             fig_chart.savefig(self.chart_path,dpi=100,bbox_inches='tight'); plt.close(fig_chart);
             self._capture_print(f"Price vs. Beach Distance chart generated: {self.chart_path}");
+
         except Exception as e: self._capture_print(f"Error visualizations: {e}\n{traceback.format_exc()}");
 
     def display_stats_internal(self, stats_gdf_in):
@@ -525,90 +616,76 @@ class TerraDashboardLogic:
                 h_pr = f"${stats_gdf['Price'].max():,.0f}" if 'Price' in stats_gdf and stats_gdf['Price'].notna().any() else 'N/A'; l_pr = f"${stats_gdf['Price'].min():,.0f}" if 'Price' in stats_gdf and stats_gdf['Price'].notna().any() else 'N/A'
                 avg_tr_val = stats_gdf['tourism_count_2km'].mean() if 'tourism_count_2km' in stats_gdf and stats_gdf['tourism_count_2km'].notna().any() else np.nan
                 avg_tr_str = f"{avg_tr_val:.1f}" if pd.notna(avg_tr_val) else 'N/A'
-                s_cnt = (stats_gdf['Category'].astype(str).str.upper()!='FOR RENT').sum() if 'Category' in stats_gdf else 0; r_cnt = (stats_gdf['Category'].astype(str).str.upper()=='FOR RENT').sum() if 'Category' in stats_gdf else 0
+                s_cnt = (stats_gdf['Category'].astype(str).str.strip().str.upper()!='FOR RENT').sum() if 'Category' in stats_gdf else 0; r_cnt = (stats_gdf['Category'].astype(str).str.strip().str.upper()=='FOR RENT').sum() if 'Category' in stats_gdf else 0
                 avg_sz_val = stats_gdf['Size_sqft'].mean() if 'Size_sqft' in stats_gdf and stats_gdf['Size_sqft'].notna().any() else np.nan
                 avg_sz_str = f"{avg_sz_val:,.0f} sq ft" if pd.notna(avg_sz_val) else "N/A"
                 self.stats_data_for_streamlit = [f"Total Properties Analyzed: {num_analyzed}",f"Unique Parishes in Data: {num_parishes}", f"Avg Beach Dist: {avg_beach_dist_str}",
-                                     f"Highest Property Price: {h_pr}",f"Lowest Property Price: {l_pr}", f"Avg Attractions (2km): {avg_tr_str}",
-                                     f"Properties For Sale: {s_cnt}",f"Properties For Rent: {r_cnt}",f"Average Property Size: {avg_sz_str}"]
+                                                 f"Highest Property Price: {h_pr}",f"Lowest Property Price: {l_pr}", f"Avg Attractions (2km): {avg_tr_str}",
+                                                 f"Properties For Sale: {s_cnt}",f"Properties For Rent: {r_cnt}",f"Average Property Size: {avg_sz_str}"]
         except Exception as e: self._capture_print(f"Error display_stats: {e}\n{traceback.format_exc()}"); self.stats_data_for_streamlit.append("Error loading stats.")
 
     def get_export_dataframe(self):
         if hasattr(self,'analyzed_properties') and not self.analyzed_properties.empty:
             df_to_export = self.analyzed_properties.copy()
+            if 'Property Type' not in df_to_export.columns and 'Property Type Standardized' in df_to_export.columns:
+                if 'Property Type' in self.analyzed_properties.columns:
+                    df_to_export['Property Type_Original'] = self.analyzed_properties['Property Type']
+
             if 'geometry' in df_to_export.columns and not df_to_export.geometry.empty:
                 if df_to_export.crs and df_to_export.crs != "EPSG:4326":
-                       df_to_export = df_to_export.to_crs("EPSG:4326")
+                        df_to_export = df_to_export.to_crs("EPSG:4326")
                 df_to_export['latitude'] = df_to_export.geometry.y
                 df_to_export['longitude'] = df_to_export.geometry.x
             cols_to_drop = ['geometry', 'original_index', 'Parish_join_key']
+            if 'area_sqkm' in df_to_export.columns: cols_to_drop.append('area_sqkm')
             actual_cols_to_drop = [col for col in cols_to_drop if col in df_to_export.columns]
             if actual_cols_to_drop:
                 df_to_export = df_to_export.drop(columns=actual_cols_to_drop)
             return df_to_export
         return pd.DataFrame()
 
-
 # --- Streamlit App UI and Main Logic ---
 def main():
-    st.set_page_config(page_title="Terra Caribbean Dashboard", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Terra Caribbean: Terrain View", layout="wide", initial_sidebar_state="expanded")
 
-    # CORRECTED: Initialize ALL session state variables at the top
-    if 'analysis_triggered' not in st.session_state:
-        st.session_state.analysis_triggered = False
-    if 'dashboard_logic_instance' not in st.session_state:
-        st.session_state.dashboard_logic_instance = None
-    if 'error_during_analysis' not in st.session_state:
-        st.session_state.error_during_analysis = False
-    if 'uploader_key' not in st.session_state:
-        st.session_state.uploader_key = 0
-    if 'analysis_done' not in st.session_state:
-        st.session_state.analysis_done = False
+    if 'analysis_triggered' not in st.session_state: st.session_state.analysis_triggered = False
+    if 'dashboard_logic_instance' not in st.session_state: st.session_state.dashboard_logic_instance = None
+    if 'error_during_analysis' not in st.session_state: st.session_state.error_during_analysis = False
+    if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
+    if 'analysis_done' not in st.session_state: st.session_state.analysis_done = False
 
     LOGO_URL = "https://s3.us-east-2.amazonaws.com/terracaribbean.com/wp-content/uploads/2025/04/08080016/site-logo.png"
 
     with st.sidebar:
         st.image(LOGO_URL, width=200)
         st.header("Controls")
-
         uploaded_file = st.file_uploader("Upload Property Data (Excel .xlsx or CSV .csv)",
                                          type=["xlsx", "csv"],
                                          key=f"file_uploader_{st.session_state.uploader_key}")
-
         status_placeholder = st.empty()
-
         run_button_clicked = st.button("🚀 Run Analysis", use_container_width=True)
 
-    st.title("🏝️ Terra Caribbean Property Dashboard")
-    st.markdown("Interactive tool to analyze property listings with geospatial data for Barbados.")
+    st.title("🏞️ Terra Caribbean: Terrain & Property View")
+    st.markdown("Interactive terrain-focused map to analyze property listings with geospatial data for Barbados.")
     st.markdown("---")
-
-# --- <<< ADD THIS SECTION HERE >>> ---
     st.info("""
-    **Understanding the Map:**
-
-    The primary output is an **Interactive Thematic GIS Web Map**. This means you can:
-    * Navigate (zoom/pan) a map of Barbados.
-    * View multiple layers like **Parish Boundaries**, **Key Land Features** (parks, schools), and **Points of Interest**.
-    * Click on **Parish Summary Markers** to see aggregated real estate data (counts, averages) for that area.
-    * Toggle layers on/off for clarity.
-
-    *It's designed to give you a visual, parish-level overview of the property landscape.*
+    **Understanding the Terrain Map:**
+    This view emphasizes the island's topography. Key features include:
+    * **Terrain Base Map:** See hills, valleys, and coastal features. Optional topographic layers are available in the map's layer control.
+    * **Parish Boundaries & Centers:** Clearly marked parishes.
+    * **Property Summaries:** Click on parish markers for aggregated property data, including Residential/Commercial splits.
+    * *Other layers (Key Land Features, Tourism POIs) are hidden by default but can be enabled via the layer control (usually top-right of the map).*
     """)
-    # --- <<< END OF ADDED SECTION >>> ---
-
 
     if run_button_clicked:
         if uploaded_file is not None:
             st.session_state.analysis_triggered = True
             st.session_state.error_during_analysis = False
             st.session_state.dashboard_logic_instance = None
-
             with status_placeholder.container():
                 with st.spinner("Analysis in progress... This may take a few minutes for the first run or new data."):
                     dashboard = TerraDashboardLogic(uploaded_file_object=uploaded_file)
                     analysis_successful = dashboard.run_analysis_streamlit()
-
                 if analysis_successful:
                     st.session_state.dashboard_logic_instance = dashboard
                     st.session_state.analysis_done = True
@@ -618,51 +695,64 @@ def main():
                     st.session_state.analysis_done = False
                     st.session_state.error_during_analysis = True
                     status_placeholder.error("Analysis failed. Check Console Log tab.")
-
             st.session_state.uploader_key += 1
         else:
             st.sidebar.warning("⚠️ Please upload a property data file first!")
             st.session_state.analysis_done = False
 
-
     dashboard_instance = st.session_state.get('dashboard_logic_instance')
-
     if dashboard_instance:
-        tab_map, tab_chart, tab_stats, tab_export, tab_console = st.tabs(["🗺️ Map", "📊 Chart", "📈 Key Statistics", "📥 Export Data", "📋 Console Log"])
+        # Define the tabs - including the new "Calculations & Notes" tab
+        tab_map, tab_chart, tab_stats, tab_parish_summary, tab_export, tab_console, tab_info = st.tabs([
+            "🗺️ Terrain Map", "📊 Chart", "📈 Key Statistics", "📊 Parish Summary",
+            "📥 Export Data", "📋 Console Log", "ℹ️ Calculations & Notes"
+        ])
 
         with tab_map:
-            st.subheader("Interactive Property Map")
+            st.subheader("Interactive Terrain Map with Property Summaries")
             if st.session_state.get('analysis_done') and dashboard_instance.map_html_content:
                 st.components.v1.html(dashboard_instance.map_html_content, height=700, scrolling=True)
-            elif st.session_state.get('analysis_triggered'):
-                st.info("Map is being generated or was not created. If analysis failed, check logs.")
-            else:
-                st.info("Map will be displayed here after analysis is run.")
+            elif st.session_state.get('analysis_triggered'): st.info("Map is being generated or was not created. If analysis failed, check logs.")
+            else: st.info("Map will be displayed here after analysis is run.")
 
         with tab_chart:
             st.subheader("Price vs. Beach Distance Chart")
             if st.session_state.get('analysis_done') and dashboard_instance.chart_path and os.path.exists(dashboard_instance.chart_path):
                 try:
                     image = Image.open(dashboard_instance.chart_path)
-                    # --- THIS IS THE CORRECTED LINE ---
                     st.image(image, caption="Property Price vs. Distance to Nearest Beach", use_container_width=True)
-                    # ------------------------------------
-                except Exception as e:
-                    st.error(f"Could not load chart: {e}")
-            elif st.session_state.get('analysis_triggered'):
-                st.info("Chart is being generated or was not created. If analysis failed, check logs.")
-            else:
-                st.info("Chart will be displayed here after analysis is run.")
+                except Exception as e: st.error(f"Could not load chart: {e}")
+            elif st.session_state.get('analysis_triggered'): st.info("Chart is being generated or was not created. If analysis failed, check logs.")
+            else: st.info("Chart will be displayed here after analysis is run.")
 
         with tab_stats:
             st.subheader("Key Statistics")
             if st.session_state.get('analysis_done') and hasattr(dashboard_instance, 'stats_data_for_streamlit') and dashboard_instance.stats_data_for_streamlit:
-                for item in dashboard_instance.stats_data_for_streamlit:
-                    st.markdown(f"- {item}")
-            elif st.session_state.get('analysis_triggered'):
-                st.info("Statistics are being generated.")
-            else:
-                st.info("Key statistics will be displayed here after analysis is run.")
+                for item in dashboard_instance.stats_data_for_streamlit: st.markdown(f"- {item}")
+            elif st.session_state.get('analysis_triggered'): st.info("Statistics are being generated.")
+            else: st.info("Key statistics will be displayed here after analysis is run.")
+
+        with tab_parish_summary:
+            st.subheader("Consolidated Parish Summary")
+            if st.session_state.get('analysis_done') and hasattr(dashboard_instance, 'parish_summary_df') and not dashboard_instance.parish_summary_df.empty:
+                summary_df = dashboard_instance.parish_summary_df.copy()
+                display_df = summary_df.drop(columns=['latitude', 'longitude'], errors='ignore')
+                st.dataframe(display_df)
+
+                @st.cache_data
+                def convert_summary_df_to_csv(df_to_convert):
+                    return df_to_convert.to_csv(index=False).encode('utf-8')
+
+                csv_summary_data = convert_summary_df_to_csv(display_df)
+                st.download_button(
+                    label="Download Parish Summary as CSV",
+                    data=csv_summary_data,
+                    file_name="terra_parish_summary.csv",
+                    mime="text/csv",
+                    key="download_summary_csv_button"
+                )
+            elif st.session_state.get('analysis_triggered'): st.info("Parish summary is being generated.")
+            else: st.info("Parish summary data will be displayed here after analysis is run.")
 
         with tab_export:
             st.subheader("Export Analyzed Data")
@@ -670,40 +760,107 @@ def main():
                 export_df = dashboard_instance.get_export_dataframe()
                 if not export_df.empty:
                     @st.cache_data
-                    def convert_df_to_csv(df_to_convert):
-                        return df_to_convert.to_csv(index=False).encode('utf-8')
+                    def convert_df_to_csv(df_to_convert): return df_to_convert.to_csv(index=False).encode('utf-8')
                     csv_data = convert_df_to_csv(export_df)
-                    st.download_button(label="Download Analyzed Data as CSV", data=csv_data,
-                                       file_name="terra_analysis_results.csv", mime="text/csv",
-                                       key="download_csv_button")
-                elif st.session_state.get('analysis_triggered') :
-                    st.info("No analyzed data available for export (result might be empty).")
-            else:
-                st.info("Analyzed data will be available for export here after analysis is run.")
+                    st.download_button(label="Download Analyzed Data as CSV", data=csv_data, file_name="terra_analysis_results.csv", mime="text/csv", key="download_csv_button")
+                elif st.session_state.get('analysis_triggered') : st.info("No analyzed data available for export (result might be empty).")
+            else: st.info("Analyzed data will be available for export here after analysis is run.")
 
         with tab_console:
             st.subheader("Analysis Log")
             if hasattr(dashboard_instance, 'log_capture') and dashboard_instance.log_capture:
                 log_content = "".join(dashboard_instance.log_capture)
                 st.text_area("Log Output:", value=log_content, height=500, key="console_log_area_display", disabled=True)
-            elif st.session_state.get('analysis_triggered'):
-                st.info("Attempting to capture logs...")
-            else:
-                st.info("Console logs from the analysis will appear here.")
+            elif st.session_state.get('analysis_triggered'): st.info("Attempting to capture logs...")
+            else: st.info("Console logs from the analysis will appear here.")
 
-        if st.session_state.get('error_during_analysis'):
-            st.error("An error occurred during the last analysis. Please review the console log in the 'Console Log' tab.")
+        # --- Content for the "Calculations & Notes" Tab ---
+        with tab_info:
+            st.subheader("Understanding the Calculations, Data & Conversions")
+            st.markdown("""
+            This section explains how the parish area figures are calculated and provides useful unit conversions.
+
+            **1. How Geographic Areas are Calculated:**
+
+            The areas of geographical units like Barbados's parishes are usually calculated using **Geographic Information Systems (GIS)**. Here's a simplified overview:
+
+            * **Data Source:** The process starts with a digital map. This map data can come from various sources:
+                * *Official Government Surveys:* National land and survey departments often provide the most authoritative boundary data.
+                * *OpenStreetMap (OSM):* As used in this app, this is a collaborative, open-source mapping project. Its data is constantly updated but can sometimes vary from official sources.
+                * *Satellite Imagery:* Used for tracing boundaries.
+            * **Defining Boundaries:** Parishes are represented as **polygons** (shapes) on the map, defined by coordinates.
+            * **Map Projections:** The Earth is 3D, maps are 2D. A **map projection** translates coordinates. This app uses `EPSG:4326` (WGS 84 - standard latitude/longitude) for display and `EPSG:32620` (UTM Zone 20N) for calculations (like area and distance) because it's better suited for measuring in meters in Barbados. *This choice influences the final area numbers.*
+            * **Area Calculation:** GIS software calculates the area within each polygon using the chosen projection. The app calculates `area_sqkm` by projecting to `EPSG:32620` and calculating the geometric area.
+            * **Why Differences Occur:** Figures can differ due to:
+                * Variations in mapped boundaries (OSM vs. Official).
+                * Different map projections used.
+                * Inclusion/exclusion of small features.
+                * Data update cycles.
+
+            **2. Key Data Processing Steps in this App:**
+
+            * **Parish Loading:** Attempts to load Parish boundaries primarily from OpenStreetMap (OSM) or a local GeoJSON file as a fallback.
+            * **Parish Cleaning:** Standardizes Parish names from your uploaded file and the map data (e.g., 'St. James' becomes 'Saint James') for better matching.
+            * **Geocoding:** Matches properties to parishes based on the cleaned names and assigns a *central point (centroid)* within the matched parish as the property's location. **Note:** This is a *parish-level* geocoding, not a precise address-point geocoding.
+            * **Area Calculation:** Calculates parish area in square kilometers (`area_sqkm`) using the `EPSG:32620` projection.
+            * **Distance Calculation:** Calculates distance to the nearest beach (`beach_dist_m`) using `EPSG:32620`.
+            * **Tourism Count:** Counts tourism points within a 2km radius, also using `EPSG:32620`.
+            * **Size Parsing:** Converts the 'Size' column from your file into square feet (`Size_sqft`), handling 'acres' and 'sq ft' units.
+
+            **3. Important Unit Conversions:**
+
+            * **Square Kilometers (km²) to Square Miles (sq mi):**
+                * `1 km² ≈ 0.386102 sq mi`
+            * **Square Kilometers (km²) to Hectares (ha):**
+                * `1 km² = 100 ha`
+            * **Square Kilometers (km²) to Acres:**
+                * `1 km² ≈ 247.105 acres`
+            * **Acres to Square Feet (sq ft):**
+                * `1 acre = 43,560 sq ft`
+            * **Meters (m) to Kilometers (km):**
+                * `1 km = 1,000 m`
+            * **Meters (m) to Miles (mi):**
+                * `1 mi ≈ 1609.34 m`
+
+            **4. Data Source & Limitations:**
+
+            * **Primary Geo Source:** OpenStreetMap (OSM). Data quality can vary.
+            * **Geocoding Accuracy:** Property locations are based on *parish centroids*, not specific addresses.
+            * **Calculations:** Based on available OSM data and specific projections; may differ from official land survey figures.
+            * **Uploaded Data:** The accuracy of the analysis heavily depends on the quality and format of your uploaded property file.
+            """)
+            st.markdown("---")
+            st.write("Raw OSM Parish Data (if loaded):")
+            if hasattr(dashboard_instance, 'raw_parishes_from_osm') and not dashboard_instance.raw_parishes_from_osm.empty:
+                st.dataframe(dashboard_instance.raw_parishes_from_osm.drop(columns='geometry', errors='ignore'))
+            else:
+                st.info("Raw OSM parish data was not loaded or is empty.")
+        # --- End of New Tab Content ---
+
+
+        if st.session_state.get('error_during_analysis'): st.error("An error occurred during the last analysis. Please review the console log in the 'Console Log' tab.")
 
     elif st.session_state.get('analysis_triggered', False) and st.session_state.get('error_during_analysis', False):
         st.error("Analysis failed. Check the console log if available from a partial run.")
-        if st.session_state.get('dashboard_logic_instance') and \
-           hasattr(st.session_state.dashboard_logic_instance, 'log_capture') and \
-           st.session_state.dashboard_logic_instance.log_capture:
+        if st.session_state.get('dashboard_logic_instance') and hasattr(st.session_state.dashboard_logic_instance, 'log_capture') and st.session_state.dashboard_logic_instance.log_capture:
             st.subheader("Partial Analysis Log")
             log_content = "".join(st.session_state.dashboard_logic_instance.log_capture)
             st.text_area("Log Output:", value=log_content, height=500, key="error_console_log_area_display_alt", disabled=True)
-    else:
-        st.info("👋 Welcome! Please upload a property data file and click '🚀 Run Analysis' in the sidebar to begin.")
+    else: st.info("👋 Welcome! Please upload a property data file and click '🚀 Run Analysis' in the sidebar to begin.")
+
+    st.markdown("---")
+    property_count = 0
+    dashboard_instance = st.session_state.get('dashboard_logic_instance')
+    if st.session_state.get('analysis_done') and dashboard_instance and not dashboard_instance.analyzed_properties.empty:
+        property_count = len(dashboard_instance.analyzed_properties)
+
+    current_year = datetime.datetime.now().year
+    credits_line1 = "Data Sources: Terra Caribbean, OpenStreetMap"
+    if property_count > 0: credits_line1 += f" • Displaying {property_count} properties."
+    credits_line2 = f"© {current_year} Terra Caribbean Geospatial Analytics Platform • All Prices in USD"
+    credits_line3 = "App Created by Matthew Blackman. Assisted by AI."
+    st.caption(f"{credits_line1}\n{credits_line2}\n{credits_line3}")
+
 
 if __name__ == "__main__":
     main()
