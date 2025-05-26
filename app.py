@@ -19,6 +19,7 @@ import traceback
 import unicodedata
 import re
 import datetime
+import math # <--- ADDED: For distance calculation
 
 # OSMnx settings
 ox.settings.log_console = False
@@ -118,6 +119,45 @@ def decimal_to_dms(deg, is_lat):
     except Exception:
         return "Error converting"
 
+# --- START: NEW HELPER FUNCTION ---
+def calculate_haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculates the distance between two points on Earth using the Haversine formula.
+
+    Args:
+        lat1 (float): Latitude of the first point in decimal degrees.
+        lon1 (float): Longitude of the first point in decimal degrees.
+        lat2 (float): Latitude of the second point in decimal degrees.
+        lon2 (float): Longitude of the second point in decimal degrees.
+
+    Returns:
+        float: Distance between the two points in kilometers.
+               Returns np.nan if any input is invalid.
+    """
+    if any(pd.isna([lat1, lon1, lat2, lon2])):
+        return np.nan
+
+    R = 6371  # Earth radius in kilometers
+
+    try:
+        lat1_rad = math.radians(lat1)
+        lon1_rad = math.radians(lon1)
+        lat2_rad = math.radians(lat2)
+        lon2_rad = math.radians(lon2)
+
+        dlon = lon2_rad - lon1_rad
+        dlat = lat2_rad - lat1_rad
+
+        a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        distance = R * c
+        return distance
+    except Exception:
+        return np.nan
+# --- END: NEW HELPER FUNCTION ---
+
+
 @st.cache_data(show_spinner=False, persist="disk")
 def load_cached_property_data(file_content_bytes, filename_for_log, log_capture_list_ref):
     log_capture_list_ref.append(f"Executing load_cached_property_data for {filename_for_log}...\n")
@@ -168,14 +208,30 @@ def load_cached_property_data(file_content_bytes, filename_for_log, log_capture_
 @st.cache_data(show_spinner=False, persist="disk")
 def get_cached_geodata(log_capture_list_ref):
     log_capture_list_ref.append("Executing get_cached_geodata (OSM fetch)...\n")
-    parishes_gdf = gpd.GeoDataFrame(); beaches_gdf = gpd.GeoDataFrame(); tourism_gdf = gpd.GeoDataFrame(); feature_polygons_gdf = gpd.GeoDataFrame();
+    parishes_gdf = gpd.GeoDataFrame()
+    beaches_gdf = gpd.GeoDataFrame()
+    tourism_gdf = gpd.GeoDataFrame()
+    feature_polygons_gdf = gpd.GeoDataFrame()
     raw_parishes_from_osm_snapshot = gpd.GeoDataFrame()
+    # --- START: New Layer Variables ---
+    schools_gdf = gpd.GeoDataFrame()
+    supermarkets_gdf = gpd.GeoDataFrame()
+    # --- END: New Layer Variables ---
+
     try:
-        log_capture_list_ref.append("Downloading Barbados country boundary...\n"); barbados_boundary = ox.geocode_to_gdf("Barbados")
-        if barbados_boundary.empty: log_capture_list_ref.append("Failed to download Barbados boundary.\n"); return parishes_gdf, beaches_gdf, tourism_gdf, feature_polygons_gdf, raw_parishes_from_osm_snapshot
+        log_capture_list_ref.append("Downloading Barbados country boundary...\n")
+        barbados_boundary = ox.geocode_to_gdf("Barbados")
+        if barbados_boundary.empty:
+            log_capture_list_ref.append("Failed to download Barbados boundary.\n")
+            # --- START: Update Return ---
+            return parishes_gdf, beaches_gdf, tourism_gdf, feature_polygons_gdf, raw_parishes_from_osm_snapshot, schools_gdf, supermarkets_gdf
+            # --- END: Update Return ---
+
         poly = barbados_boundary.geometry.iloc[0]
-        tags_list = [{"boundary":"administrative","admin_level":"6"},{"place":"parish"}]; log_capture_list_ref.append("Attempting to download parish boundaries from OSM...\n")
-        temp_parishes_data = gpd.GeoDataFrame(); found_parish_data_source = False
+        tags_list = [{"boundary":"administrative","admin_level":"6"},{"place":"parish"}]
+        log_capture_list_ref.append("Attempting to download parish boundaries from OSM...\n")
+        temp_parishes_data = gpd.GeoDataFrame()
+        found_parish_data_source = False
         for tags in tags_list:
             try:
                 current_fetch = ox.features_from_polygon(poly, tags)
@@ -183,11 +239,22 @@ def get_cached_geodata(log_capture_list_ref):
                     current_fetch = current_fetch[current_fetch.geometry.type.isin(['Polygon','MultiPolygon'])]
                     if not current_fetch.empty:
                         if any(name_tag in current_fetch.columns for name_tag in ['name', 'official_name', 'name:en']):
-                            temp_parishes_data = current_fetch; log_capture_list_ref.append(f"Successfully downloaded features using tags: {tags}\n"); found_parish_data_source = True; break
-            except Exception as e: log_capture_list_ref.append(f"Parish download attempt with tags {tags} failed: {e}\n")
-        if not found_parish_data_source or temp_parishes_data.empty: log_capture_list_ref.append("OSM parish download failed or no usable data.\n"); return parishes_gdf, beaches_gdf, tourism_gdf, feature_polygons_gdf, raw_parishes_from_osm_snapshot
+                            temp_parishes_data = current_fetch
+                            log_capture_list_ref.append(f"Successfully downloaded features using tags: {tags}\n")
+                            found_parish_data_source = True
+                            break
+            except Exception as e:
+                log_capture_list_ref.append(f"Parish download attempt with tags {tags} failed: {e}\n")
+
+        if not found_parish_data_source or temp_parishes_data.empty:
+            log_capture_list_ref.append("OSM parish download failed or no usable data.\n")
+            # --- START: Update Return ---
+            return parishes_gdf, beaches_gdf, tourism_gdf, feature_polygons_gdf, raw_parishes_from_osm_snapshot, schools_gdf, supermarkets_gdf
+            # --- END: Update Return ---
+
         parishes_gdf = temp_parishes_data
-        if not parishes_gdf.empty: raw_parishes_from_osm_snapshot = parishes_gdf.copy();
+        if not parishes_gdf.empty: raw_parishes_from_osm_snapshot = parishes_gdf.copy()
+
         if not parishes_gdf.empty:
             if 'name' not in parishes_gdf.columns: parishes_gdf['name'] = parishes_gdf.index.astype(str)
             else: parishes_gdf['name'] = parishes_gdf['name'].replace(['nan', 'NaN', 'Nan', 'none', 'None', '', 'null', 'NULL'], None, regex=False)
@@ -198,7 +265,8 @@ def get_cached_geodata(log_capture_list_ref):
                     cleaned_pref_col = parishes_gdf[col_name_pref].replace(['nan', 'NaN', 'Nan', 'none', 'None', '', 'null', 'NULL'], None, regex=False)
                     parishes_gdf['OSM_Parish_Name'] = parishes_gdf['OSM_Parish_Name'].fillna(cleaned_pref_col)
             parishes_gdf['name'] = parishes_gdf['name'].apply(clean_parish_name_generic_static)
-            final_parish_cols = ['name', 'OSM_Parish_Name', 'geometry']; existing_final_cols = [col for col in final_parish_cols if col in parishes_gdf.columns]
+            final_parish_cols = ['name', 'OSM_Parish_Name', 'geometry']
+            existing_final_cols = [col for col in final_parish_cols if col in parishes_gdf.columns]
             if not all(col in existing_final_cols for col in ['name', 'OSM_Parish_Name']):
                 if 'name' not in parishes_gdf.columns: parishes_gdf['name'] = pd.Series([None] * len(parishes_gdf), index=parishes_gdf.index)
                 if 'OSM_Parish_Name' not in parishes_gdf.columns: parishes_gdf['OSM_Parish_Name'] = pd.Series([None] * len(parishes_gdf), index=parishes_gdf.index)
@@ -208,10 +276,15 @@ def get_cached_geodata(log_capture_list_ref):
                 parishes_gdf.set_crs(barbados_boundary.crs,inplace=True); parishes_gdf = parishes_gdf[parishes_gdf.geometry.is_valid & parishes_gdf.geometry.notna()]
                 if not parishes_gdf.empty: log_capture_list_ref.append(f"Found and processed {len(parishes_gdf)} valid OSM parish geometries.\n")
             else: parishes_gdf = gpd.GeoDataFrame()
-        log_capture_list_ref.append("Downloading beach data from OSM...\n"); beaches_gdf = ox.features_from_polygon(poly,tags={"natural":"beach"});
+
+        log_capture_list_ref.append("Downloading beach data from OSM...\n")
+        beaches_gdf = ox.features_from_polygon(poly,tags={"natural":"beach"})
         if not beaches_gdf.empty: beaches_gdf = beaches_gdf[beaches_gdf.geometry.notna()]
-        log_capture_list_ref.append("Downloading tourism points from OSM...\n"); tourism_gdf = ox.features_from_polygon(poly, tags={"tourism": True});
+
+        log_capture_list_ref.append("Downloading tourism points from OSM...\n")
+        tourism_gdf = ox.features_from_polygon(poly, tags={"tourism": True})
         if not tourism_gdf.empty: tourism_gdf = tourism_gdf[tourism_gdf.geometry.notna()]
+
         feature_polygon_tags = {"leisure": ["park", "golf_course", "nature_reserve", "recreation_ground"], "amenity": ["university", "college", "school"], "landuse": ["cemetery", "religious"]}
         try:
             feature_polygons_gdf = ox.features_from_polygon(poly, tags=feature_polygon_tags)
@@ -219,8 +292,39 @@ def get_cached_geodata(log_capture_list_ref):
                 feature_polygons_gdf = feature_polygons_gdf[feature_polygons_gdf.geometry.type.isin(['Polygon', 'MultiPolygon']) & feature_polygons_gdf['name'].notna() & feature_polygons_gdf.geometry.notna()]
                 if not feature_polygons_gdf.empty: feature_polygons_gdf = feature_polygons_gdf[feature_polygons_gdf.geometry.is_valid]
         except Exception as e_fp: log_capture_list_ref.append(f"Could not fetch feature polygons from OSM: {e_fp}\n")
-        return parishes_gdf, beaches_gdf, tourism_gdf, feature_polygons_gdf, raw_parishes_from_osm_snapshot
-    except Exception as e: log_capture_list_ref.append(f"General error in get_geodata: {e}\n{traceback.format_exc()}\n"); return gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame()
+
+        # --- START: Download New Layers ---
+        try:
+            log_capture_list_ref.append("Downloading school data from OSM...\n")
+            schools_gdf = ox.features_from_polygon(poly, tags={"amenity": "school"})
+            if not schools_gdf.empty:
+                schools_gdf = schools_gdf[schools_gdf.geometry.notna()]
+                log_capture_list_ref.append(f"Found {len(schools_gdf)} schools.\n")
+            else: log_capture_list_ref.append("No schools found in OSM.\n")
+        except Exception as e_sch:
+            log_capture_list_ref.append(f"Error fetching schools: {e_sch}\n")
+
+        try:
+            log_capture_list_ref.append("Downloading supermarket data from OSM...\n")
+            supermarkets_gdf = ox.features_from_polygon(poly, tags={"shop": "supermarket"})
+            if not supermarkets_gdf.empty:
+                supermarkets_gdf = supermarkets_gdf[supermarkets_gdf.geometry.notna()]
+                log_capture_list_ref.append(f"Found {len(supermarkets_gdf)} supermarkets.\n")
+            else: log_capture_list_ref.append("No supermarkets found in OSM.\n")
+        except Exception as e_sup:
+            log_capture_list_ref.append(f"Error fetching supermarkets: {e_sup}\n")
+        # --- END: Download New Layers ---
+
+        # --- START: Update Return ---
+        return parishes_gdf, beaches_gdf, tourism_gdf, feature_polygons_gdf, raw_parishes_from_osm_snapshot, schools_gdf, supermarkets_gdf
+        # --- END: Update Return ---
+
+    except Exception as e:
+        log_capture_list_ref.append(f"General error in get_geodata: {e}\n{traceback.format_exc()}\n")
+        # --- START: Update Return ---
+        return gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame(), gpd.GeoDataFrame()
+        # --- END: Update Return ---
+
 
 @st.cache_data(show_spinner=False, persist="disk")
 def get_cached_alternative_parish_data(log_capture_list_ref):
@@ -259,6 +363,10 @@ class TerraDashboardLogic:
         self.beaches = gpd.GeoDataFrame()
         self.tourism_points = gpd.GeoDataFrame()
         self.feature_polygons = gpd.GeoDataFrame()
+        # --- START: New Layer Attributes ---
+        self.schools = gpd.GeoDataFrame()
+        self.supermarkets = gpd.GeoDataFrame()
+        # --- END: New Layer Attributes ---
         self.map_html_content = None
         self.chart_path = ""
         self.stats_data_for_streamlit = []
@@ -278,9 +386,14 @@ class TerraDashboardLogic:
         return pd.DataFrame()
 
     def _get_geodata(self):
-        parishes, beaches, tourism, features, raw_osm = get_cached_geodata(self.log_capture)
+        # --- START: Update Function Call & Assignment ---
+        parishes, beaches, tourism, features, raw_osm, schools, supermarkets = get_cached_geodata(self.log_capture)
         self.raw_parishes_from_osm = raw_osm
+        self.schools = schools # Store schools
+        self.supermarkets = supermarkets # Store supermarkets
+        # We only need to return the ones the main flow expects directly
         return parishes, beaches, tourism, features
+        # --- END: Update Function Call & Assignment ---
 
     def _get_alternative_parish_data(self):
         return get_cached_alternative_parish_data(self.log_capture)
@@ -303,6 +416,7 @@ class TerraDashboardLogic:
                 self._capture_print(str(properties['Category'].value_counts(dropna=False).to_string()))
 
             self._capture_print("\nDownloading/Loading geospatial data...")
+            # This call will now populate self.schools and self.supermarkets too
             primary_parishes, self.beaches, self.tourism_points, self.feature_polygons = self._get_geodata()
 
             if primary_parishes.empty:
@@ -313,6 +427,7 @@ class TerraDashboardLogic:
             else:
                 self.parishes = primary_parishes
 
+            # ... (Keep parish processing code) ...
             if not self.parishes.empty:
                 self._capture_print(f"\nProcessing {len(self.parishes)} parishes for map display and matching.")
                 problematic_strings_to_none = ['nan', 'NaN', 'Nan', 'NONE', 'None', 'none', '', 'null', 'Null', 'NULL', '<NA>']
@@ -343,8 +458,11 @@ class TerraDashboardLogic:
                 if not self.parishes.empty: # Ensure column exists
                     self.parishes['area_sqkm'] = np.nan
 
-
             if not self.feature_polygons.empty: self._capture_print(f"Fetched {len(self.feature_polygons)} feature polygons.")
+            if not self.schools.empty: self._capture_print(f"Fetched {len(self.schools)} schools.")
+            if not self.supermarkets.empty: self._capture_print(f"Fetched {len(self.supermarkets)} supermarkets.")
+
+
             self._capture_print("\nGeocoding properties...");
             geo_properties = self.geocode_properties_internal(properties, self.parishes.copy())
             if geo_properties.empty: self._capture_print("No properties geocoded. Aborting."); self.display_stats_internal(gpd.GeoDataFrame()); return False
@@ -354,6 +472,7 @@ class TerraDashboardLogic:
             if self.analyzed_properties.empty: self._capture_print("Spatial analysis resulted in no properties. Aborting."); return False
             self._capture_print(f"\nSpatial analysis complete for {len(self.analyzed_properties)} properties.")
             self._capture_print("\nGenerating visualizations...")
+            # This function will now have access to self.schools & self.supermarkets
             self.create_visualizations_internal(self.analyzed_properties, self.parishes.copy(), self.feature_polygons.copy(), self.tourism_points.copy())
             self.display_stats_internal(self.analyzed_properties)
             self._capture_print("\n=== Analysis complete! ===")
@@ -466,7 +585,7 @@ class TerraDashboardLogic:
             point_gdf = gpd.GeoDataFrame([1], geometry=[point_geom], crs="EPSG:4326")
 
             parishes_4326 = self.parishes.to_crs("EPSG:4326")
-            
+
             # Create a copy for filtering
             parishes_to_join = parishes_4326.copy()
 
@@ -474,51 +593,37 @@ class TerraDashboardLogic:
             mask_osm_name = pd.Series([True] * len(parishes_to_join), index=parishes_to_join.index)
             if 'OSM_Parish_Name' in parishes_to_join.columns:
                 mask_osm_name = parishes_to_join['OSM_Parish_Name'].fillna('').astype(str).str.lower() != 'barbados'
-            
+
             mask_name = pd.Series([True] * len(parishes_to_join), index=parishes_to_join.index)
             if 'name' in parishes_to_join.columns:
                 mask_name = parishes_to_join['name'].fillna('').astype(str).str.lower() != 'barbados'
-            
-            # Combine masks: a row is kept if NEITHER of its name fields are 'Barbados'
-            # (or if a name field doesn't exist, its mask remains all True, effectively not filtering on it)
+
+            # Combine masks
             parishes_to_join = parishes_to_join[mask_osm_name & mask_name]
 
             if parishes_to_join.empty and not parishes_4326.empty:
-                self._capture_print("WARN: Filtering out 'Barbados' from name columns removed all parish entries. Consider checking parish data source. Using unfiltered for now.")
-                # Fallback if filtering removed everything, but this might re-introduce the problem
-                # A better approach if this happens often is to ensure the source self.parishes is clean.
-                parishes_to_join = parishes_4326 
+                self._capture_print("WARN: Filtering out 'Barbados' removed all parish entries. Using unfiltered.")
+                parishes_to_join = parishes_4326
             elif parishes_to_join.empty and parishes_4326.empty:
                 return "No parish data to perform lookup."
 
             joined_gdf = gpd.sjoin(point_gdf, parishes_to_join, how="inner", predicate="within")
 
             if not joined_gdf.empty:
-                # Prioritize OSM_Parish_Name, then name, ensuring it's not 'Barbados'
-                # Iterate through matches if the first one is 'Barbados' or not specific enough
-                found_parish = "Parish name not identified" 
+                found_parish = "Parish name not identified"
                 for idx, row in joined_gdf.iterrows():
                     osm_name = row.get('OSM_Parish_Name')
                     name_col = row.get('name')
-                    
                     if osm_name and pd.notna(osm_name) and osm_name.strip().lower() not in ['', 'barbados', 'parish name n/a']:
-                        found_parish = osm_name
-                        break 
+                        found_parish = osm_name; break
                     if name_col and pd.notna(name_col) and name_col.strip().lower() not in ['', 'barbados', 'parish name n/a']:
-                        found_parish = name_col
-                        break
-                
-                # If after iterating, we still have the default or a generic non-parish name from the first .iloc[0] approach:
+                        found_parish = name_col; break
+
                 if found_parish == "Parish name not identified" or found_parish.lower() == 'barbados':
-                     # Check the first result again with less strict conditions if loop failed.
-                     first_match_osm = joined_gdf['OSM_Parish_Name'].iloc[0] if 'OSM_Parish_Name' in joined_gdf.columns else None
-                     first_match_name = joined_gdf['name'].iloc[0] if 'name' in joined_gdf.columns else None
-                     if first_match_osm and pd.notna(first_match_osm) and first_match_osm.lower() != 'barbados':
-                         found_parish = first_match_osm
-                     elif first_match_name and pd.notna(first_match_name) and first_match_name.lower() != 'barbados':
-                         found_parish = first_match_name
-                     # If it's still 'Barbados', it means that was the only non-generic match.
-                     # This scenario should ideally be prevented by cleaner source data or more robust filtering above.
+                   first_match_osm = joined_gdf['OSM_Parish_Name'].iloc[0] if 'OSM_Parish_Name' in joined_gdf.columns else None
+                   first_match_name = joined_gdf['name'].iloc[0] if 'name' in joined_gdf.columns else None
+                   if first_match_osm and pd.notna(first_match_osm) and first_match_osm.lower() != 'barbados': found_parish = first_match_osm
+                   elif first_match_name and pd.notna(first_match_name) and first_match_name.lower() != 'barbados': found_parish = first_match_name
 
                 return found_parish
             else:
@@ -538,6 +643,10 @@ class TerraDashboardLogic:
         all_parishes_gdf = self.parishes.copy()
         feature_polygons = self.feature_polygons.copy() if hasattr(self, 'feature_polygons') else gpd.GeoDataFrame()
         tourism_points = self.tourism_points.copy() if hasattr(self, 'tourism_points') else gpd.GeoDataFrame()
+        # --- START: Copy New Layers ---
+        schools = self.schools.copy() if hasattr(self, 'schools') else gpd.GeoDataFrame()
+        supermarkets = self.supermarkets.copy() if hasattr(self, 'supermarkets') else gpd.GeoDataFrame()
+        # --- END: Copy New Layers ---
         parish_summary = self.parish_summary_df.copy() if hasattr(self, 'parish_summary_df') else pd.DataFrame()
 
         stamen_terrain_attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>, under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>. Data by <a href="http://openstreetmap.org">OpenStreetMap</a>, under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.'
@@ -557,9 +666,9 @@ class TerraDashboardLogic:
             if not parishes_4326.empty:
                 parish_boundary_layer = folium.FeatureGroup(name="Parish Boundaries & Centers", show=True).add_to(m)
                 folium.GeoJson(parishes_4326,style_function=lambda x: {'fillColor':'#D3D3D3','color':'#333333','weight':1.5,'fillOpacity':0.3},
-                                 highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
-                                 tooltip=folium.GeoJsonTooltip(fields=['OSM_Parish_Name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
-                                ).add_to(parish_boundary_layer)
+                                       highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
+                                       tooltip=folium.GeoJsonTooltip(fields=['OSM_Parish_Name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
+                                      ).add_to(parish_boundary_layer)
                 for idx, parish_row in parishes_4326.iterrows():
                     name = parish_row['OSM_Parish_Name']
                     try:
@@ -575,13 +684,14 @@ class TerraDashboardLogic:
                 def get_feature_style(props):
                     style = {'fillOpacity': 0.4, 'weight': 1.5, 'color': 'grey'}; leisure = props.get('leisure'); amenity = props.get('amenity')
                     if leisure == 'park': style.update({'fillColor': '#86C166', 'color': '#5E8C4A'})
+                    # Add more styles here if needed
                     return style
                 feature_layer = folium.FeatureGroup(name="Key Land Features", show=False).add_to(m)
                 for _, row in feature_polygons_4326.iterrows():
                     single_feature_gdf = gpd.GeoDataFrame([row], crs=feature_polygons_4326.crs)
                     folium.GeoJson(single_feature_gdf, style_function=lambda x: get_feature_style(x['properties']),
-                                   highlight_function=lambda x: {'weight': 3, 'color': 'black', 'fillOpacity': 0.6},
-                                   tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Name:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=False)).add_to(feature_layer)
+                                       highlight_function=lambda x: {'weight': 3, 'color': 'black', 'fillOpacity': 0.6},
+                                       tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Name:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=False)).add_to(feature_layer)
 
         if not parish_summary.empty:
             parish_summary_layer = folium.FeatureGroup(name="Property Summaries by Parish", show=True).add_to(m)
@@ -630,6 +740,40 @@ class TerraDashboardLogic:
                     if pt_geom.geom_type!='Point': pt_geom=pt_geom.representative_point()
                     if pt_geom.is_empty: continue
                     folium.Marker([pt_geom.y,pt_geom.x],tooltip=f"<b>{name}</b><br><small>{pt_row.get('tourism','N/A').replace('_',' ').title()}</small>", icon=folium.Icon(color='blue',icon='info-sign',prefix='fa')).add_to(landmark_pts_layer)
+
+        # --- START: Add Schools Layer ---
+        if not schools.empty and 'geometry' in schools.columns:
+            schools_4326 = schools.to_crs("EPSG:4326")[schools.geometry.is_valid & schools.geometry.notna()]
+            if not schools_4326.empty:
+                schools_layer = folium.FeatureGroup(name="Schools", show=False).add_to(m) # show=False
+                for idx, pt_row in schools_4326.iterrows():
+                    name = pt_row.get('name', 'School')
+                    pt_geom = pt_row.geometry
+                    if pt_geom.geom_type != 'Point': pt_geom = pt_geom.representative_point()
+                    if pt_geom.is_empty: continue
+                    folium.Marker(
+                        [pt_geom.y, pt_geom.x],
+                        tooltip=f"<b>{name}</b><br><small>School</small>",
+                        icon=folium.Icon(color='blue', icon='graduation-cap', prefix='fa')
+                    ).add_to(schools_layer)
+        # --- END: Add Schools Layer ---
+
+        # --- START: Add Supermarkets Layer ---
+        if not supermarkets.empty and 'geometry' in supermarkets.columns:
+            supermarkets_4326 = supermarkets.to_crs("EPSG:4326")[supermarkets.geometry.is_valid & supermarkets.geometry.notna()]
+            if not supermarkets_4326.empty:
+                supermarkets_layer = folium.FeatureGroup(name="Supermarkets", show=False).add_to(m) # show=False
+                for idx, pt_row in supermarkets_4326.iterrows():
+                    name = pt_row.get('name', 'Supermarket')
+                    pt_geom = pt_row.geometry
+                    if pt_geom.geom_type != 'Point': pt_geom = pt_geom.representative_point()
+                    if pt_geom.is_empty: continue
+                    folium.Marker(
+                        [pt_geom.y, pt_geom.x],
+                        tooltip=f"<b>{name}</b><br><small>Supermarket</small>",
+                        icon=folium.Icon(color='green', icon='shopping-cart', prefix='fa')
+                    ).add_to(supermarkets_layer)
+        # --- END: Add Supermarkets Layer ---
 
         # Add marker for the located point if it was set by the user
         if center_lat is not None and center_lon is not None and st.session_state.get('location_explicitly_set', False):
@@ -697,7 +841,6 @@ class TerraDashboardLogic:
                 self.parish_summary_df = pd.DataFrame()
             # --- End Parish Summary Calculation ---
 
-
             # --- Generate Initial Map ---
             m = self.create_map_object_streamlit() # Call with defaults
             if m:
@@ -707,7 +850,6 @@ class TerraDashboardLogic:
                 self.map_html_content = None
                 self._capture_print("\nCould not generate map - data missing?")
             # --- End Initial Map ---
-
 
             # --- Generate Chart ---
             fig_chart, ax_chart = plt.subplots(figsize=(10,6))
@@ -787,6 +929,7 @@ def main():
     if 'location_explicitly_set' not in st.session_state: st.session_state.location_explicitly_set = False
     if 'needs_map_update' not in st.session_state: st.session_state.needs_map_update = False
     if 'location_info' not in st.session_state: st.session_state.location_info = None
+    if 'distance_result' not in st.session_state: st.session_state.distance_result = None # <--- ADDED
 
 
     LOGO_URL = "https://s3.us-east-2.amazonaws.com/terracaribbean.com/wp-content/uploads/2025/04/08080016/site-logo.png"
@@ -806,7 +949,6 @@ def main():
         if st.session_state.get('analysis_done') and dashboard_instance: # Check instance exists
             st.markdown("---")
             st.header("Locate on Map")
-            # Use session state to keep the values after input
             lat_val = st.session_state.get('map_center_lat_input', 13.1939)
             lon_val = st.session_state.get('map_center_lon_input', -59.5432)
             zoom_val = st.session_state.get('map_zoom_input', 14)
@@ -826,17 +968,15 @@ def main():
                 st.session_state.map_zoom_input = zoom_input
                 st.session_state.needs_map_update = True
 
-                # Calculate and store info
                 lat_dms = decimal_to_dms(lat_input, True)
                 lon_dms = decimal_to_dms(lon_input, False)
                 identified_parish_name = dashboard_instance.get_parish_for_coords(lat_input, lon_input)
-
                 parish_area_str = "N/A"
                 parish_avg_beach_dist_str = "N/A"
                 parish_avg_tourism_count_str = "N/A"
 
                 valid_parish_identified = identified_parish_name and \
-                                           identified_parish_name not in ["Not within a known parish boundary.",
+                                          identified_parish_name not in ["Not within a known parish boundary.",
                                                                           "Error during parish lookup.",
                                                                           "Parish data not available or coordinates invalid.",
                                                                           "Parish name not identified",
@@ -845,34 +985,25 @@ def main():
                 if valid_parish_identified:
                     if hasattr(dashboard_instance, 'parish_summary_df') and not dashboard_instance.parish_summary_df.empty:
                         summary_parish_col = None
-                        if 'OSM_Parish_Name' in dashboard_instance.parish_summary_df.columns:
-                            summary_parish_col = 'OSM_Parish_Name'
-                        elif 'Parish' in dashboard_instance.parish_summary_df.columns:
-                            summary_parish_col = 'Parish'
-                        
+                        if 'OSM_Parish_Name' in dashboard_instance.parish_summary_df.columns: summary_parish_col = 'OSM_Parish_Name'
+                        elif 'Parish' in dashboard_instance.parish_summary_df.columns: summary_parish_col = 'Parish'
+
                         if summary_parish_col:
-                            # Ensure identified_parish_name is a string for comparison
                             parish_stats = dashboard_instance.parish_summary_df[
                                 dashboard_instance.parish_summary_df[summary_parish_col].astype(str) == str(identified_parish_name)
                             ]
-
                             if not parish_stats.empty:
                                 stats_row = parish_stats.iloc[0]
-                                
                                 area_val = stats_row.get('area_sqkm')
                                 parish_area_str = f"{area_val:.1f} sq km" if pd.notna(area_val) and area_val > 0 else "N/A"
-                                
                                 beach_dist_val = stats_row.get('avg_beach_dist_m')
                                 parish_avg_beach_dist_str = f"{(beach_dist_val / 1000):.1f} km" if pd.notna(beach_dist_val) else "N/A"
-                                
                                 tourism_count_val = stats_row.get('avg_tourism_count_2km')
                                 parish_avg_tourism_count_str = f"{tourism_count_val:.1f}" if pd.notna(tourism_count_val) else "N/A"
 
                 st.session_state.location_info = {
-                    "lat_dec": lat_input,
-                    "lon_dec": lon_input,
-                    "lat_dms": lat_dms,
-                    "lon_dms": lon_dms,
+                    "lat_dec": lat_input, "lon_dec": lon_input,
+                    "lat_dms": lat_dms, "lon_dms": lon_dms,
                     "parish": identified_parish_name,
                     "parish_area": parish_area_str,
                     "parish_avg_beach_dist": parish_avg_beach_dist_str,
@@ -887,22 +1018,49 @@ def main():
                 st.markdown(f"**Coordinates (Entered Point):**")
                 st.markdown(f"&nbsp;&nbsp;&nbsp;Lat: {info['lat_dec']:.6f} / {info['lat_dms']}")
                 st.markdown(f"&nbsp;&nbsp;&nbsp;Lon: {info['lon_dec']:.6f} / {info['lon_dms']}")
-                
                 st.markdown(f"**Identified Parish:**")
                 st.markdown(f"&nbsp;&nbsp;&nbsp;Name: {info['parish']}")
-
                 valid_parish_for_stats = info["parish"] and \
-                                          info["parish"] not in ["Not within a known parish boundary.",
-                                                                  "Error during parish lookup.",
-                                                                  "Parish data not available or coordinates invalid.",
-                                                                  "Parish name not identified",
-                                                                  "Parish Name Found (but empty)"]
+                                         info["parish"] not in ["Not within a known parish boundary.",
+                                                                 "Error during parish lookup.",
+                                                                 "Parish data not available or coordinates invalid.",
+                                                                 "Parish name not identified",
+                                                                 "Parish Name Found (but empty)"]
                 if valid_parish_for_stats:
                     st.markdown(f"**Parish Level Summary ({info['parish']}):**")
                     st.markdown(f"&nbsp;&nbsp;&nbsp;Area: {info.get('parish_area', 'N/A')}")
                     st.markdown(f"&nbsp;&nbsp;&nbsp;Avg. Beach Distance: {info.get('parish_avg_beach_dist', 'N/A')}")
                     st.markdown(f"&nbsp;&nbsp;&nbsp;Avg. Attractions (2km): {info.get('parish_avg_tourism_count', 'N/A')}")
         # --- End Location Finder ---
+
+        # --- START: NEW Distance Calculator ---
+        st.markdown("---")
+        st.header("📏 Calculate Distance")
+        st.write("Enter the coordinates for two points to calculate the 'as-the-crow-flies' distance between them.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Point 1")
+            lat1_input = st.number_input("Start Latitude:", value=13.1939, format="%.6f", key="dist_lat1")
+            lon1_input = st.number_input("Start Longitude:", value=-59.5432, format="%.6f", key="dist_lon1")
+        with col2:
+            st.subheader("Point 2")
+            lat2_input = st.number_input("End Latitude:", value=13.0667, format="%.6f", key="dist_lat2")
+            lon2_input = st.number_input("End Longitude:", value=-59.6167, format="%.6f", key="dist_lon2")
+
+        calc_dist_button = st.button("Calculate Distance Between Points", use_container_width=True)
+
+        if calc_dist_button:
+            distance_km = calculate_haversine_distance(lat1_input, lon1_input, lat2_input, lon2_input)
+            if pd.notna(distance_km):
+                distance_miles = distance_km * 0.621371
+                st.session_state.distance_result = f"**Distance:** {distance_km:.2f} km ({distance_miles:.2f} miles)"
+            else:
+                st.session_state.distance_result = "**Error:** Please ensure all coordinates are valid numbers."
+
+        if st.session_state.distance_result:
+            st.success(st.session_state.distance_result) # Display result directly in sidebar
+        # --- END: NEW Distance Calculator ---
 
 
     st.title("🏞️ Terra Caribbean: Terrain & Property View")
@@ -915,7 +1073,8 @@ def main():
     * **Parish Boundaries & Centers:** Clearly marked parishes.
     * **Property Summaries:** Click on parish markers for aggregated property data, including Residential/Commercial splits.
     * **Locate on Map (Sidebar):** Enter Latitude and Longitude, click "Go to Location" to center the map, add a marker, and see location details in the sidebar.
-    * *Other layers (Key Land Features, Tourism POIs) are hidden by default but can be enabled via the layer control (usually top-right of the map).*
+    * **Calculate Distance (Sidebar):** Enter two sets of coordinates to find the direct distance between them.
+    * ***Other layers (Schools, Supermarkets, Land Features, POIs) are hidden by default but can be enabled via the layer control (top-right of the map).***
     """)
 
     if run_button_clicked:
@@ -923,13 +1082,10 @@ def main():
             # Reset location state on new analysis
             st.session_state.location_explicitly_set = False
             st.session_state.needs_map_update = False
-            st.session_state.location_info = None # Clear info
-            if 'map_center_lat' in st.session_state: del st.session_state.map_center_lat
-            if 'map_center_lon' in st.session_state: del st.session_state.map_center_lon
-            if 'map_zoom' in st.session_state: del st.session_state.map_zoom
-            if 'map_center_lat_input' in st.session_state: del st.session_state.map_center_lat_input
-            if 'map_center_lon_input' in st.session_state: del st.session_state.map_center_lon_input
-            if 'map_zoom_input' in st.session_state: del st.session_state.map_zoom_input
+            st.session_state.location_info = None
+            st.session_state.distance_result = None # Reset distance too
+            for key in ['map_center_lat', 'map_center_lon', 'map_zoom', 'map_center_lat_input', 'map_center_lon_input', 'map_zoom_input']:
+                if key in st.session_state: del st.session_state[key]
 
             st.session_state.analysis_triggered = True
             st.session_state.error_during_analysis = False
@@ -941,22 +1097,20 @@ def main():
                 if analysis_successful:
                     st.session_state.dashboard_logic_instance = dashboard
                     st.session_state.analysis_done = True
-                    st.session_state.needs_map_update = True # Trigger initial map generation
+                    st.session_state.needs_map_update = True
                     status_placeholder.success("Analysis Complete!")
-                    st.rerun() # Force rerun to process map generation and sidebar update.
+                    st.rerun()
                 else:
                     st.session_state.dashboard_logic_instance = dashboard
                     st.session_state.analysis_done = False
                     st.session_state.error_during_analysis = True
                     status_placeholder.error("Analysis failed. Check Console Log tab.")
-            st.session_state.uploader_key += 1 # Rerender uploader
-
-
+            st.session_state.uploader_key += 1
         else:
             st.sidebar.warning("⚠️ Please upload a property data file first!")
             st.session_state.analysis_done = False
 
-    dashboard_instance = st.session_state.get('dashboard_logic_instance') # Re-get instance after potential rerun
+    dashboard_instance = st.session_state.get('dashboard_logic_instance')
     if dashboard_instance:
         tab_map, tab_chart, tab_stats, tab_parish_summary, tab_export, tab_console, tab_info = st.tabs([
             "🗺️ Terrain Map", "📊 Chart", "📈 Key Statistics", "📊 Parish Summary",
@@ -966,34 +1120,27 @@ def main():
         with tab_map:
             st.subheader("Interactive Terrain Map with Property Summaries")
             if st.session_state.get('analysis_done') and dashboard_instance:
-                # Decide if we need to regenerate the map
                 regenerate_map = st.session_state.get('needs_map_update', False)
 
                 if regenerate_map or not dashboard_instance.map_html_content:
                     with st.spinner("Generating / Updating map..."):
-                        map_lat = st.session_state.get('map_center_lat') # Use session state or None
-                        map_lon = st.session_state.get('map_center_lon') # Use session state or None
-                        map_zoom = st.session_state.get('map_zoom') # Use session state or None
-
+                        map_lat = st.session_state.get('map_center_lat')
+                        map_lon = st.session_state.get('map_center_lon')
+                        map_zoom = st.session_state.get('map_zoom')
                         map_obj = dashboard_instance.create_map_object_streamlit(
-                           center_lat=map_lat,
-                           center_lon=map_lon,
-                           zoom=map_zoom
+                            center_lat=map_lat, center_lon=map_lon, zoom=map_zoom
                         )
                         if map_obj:
                             dashboard_instance.map_html_content = map_obj.get_root().render()
                         else:
-                             dashboard_instance.map_html_content = "<p>Error generating map. Check if data was loaded correctly.</p>"
-                    st.session_state.needs_map_update = False # Reset flag after update
+                             dashboard_instance.map_html_content = "<p>Error generating map. Check data.</p>"
+                    st.session_state.needs_map_update = False
 
                 if dashboard_instance.map_html_content:
                     st.components.v1.html(dashboard_instance.map_html_content, height=700, scrolling=True)
-                else:
-                    st.info("Map could not be generated.")
-
-            elif st.session_state.get('analysis_triggered'): st.info("Map is being generated or was not created. If analysis failed, check logs.")
+                else: st.info("Map could not be generated.")
+            elif st.session_state.get('analysis_triggered'): st.info("Map is being generated...")
             else: st.info("Map will be displayed here after analysis is run.")
-
 
         with tab_chart:
             st.subheader("Price vs. Beach Distance Chart")
@@ -1002,7 +1149,7 @@ def main():
                     image = Image.open(dashboard_instance.chart_path)
                     st.image(image, caption="Property Price vs. Distance to Nearest Beach", use_container_width=True)
                 except Exception as e: st.error(f"Could not load chart: {e}")
-            elif st.session_state.get('analysis_triggered'): st.info("Chart is being generated or was not created. If analysis failed, check logs.")
+            elif st.session_state.get('analysis_triggered'): st.info("Chart is being generated...")
             else: st.info("Chart will be displayed here after analysis is run.")
 
         with tab_stats:
@@ -1025,11 +1172,8 @@ def main():
 
                 csv_summary_data = convert_summary_df_to_csv(display_df)
                 st.download_button(
-                    label="Download Parish Summary as CSV",
-                    data=csv_summary_data,
-                    file_name="terra_parish_summary.csv",
-                    mime="text/csv",
-                    key="download_summary_csv_button"
+                    label="Download Parish Summary as CSV", data=csv_summary_data,
+                    file_name="terra_parish_summary.csv", mime="text/csv", key="download_summary_csv_button"
                 )
             elif st.session_state.get('analysis_triggered'): st.info("Parish summary is being generated.")
             else: st.info("Parish summary data will be displayed here after analysis is run.")
@@ -1043,7 +1187,7 @@ def main():
                     def convert_df_to_csv(df_to_convert): return df_to_convert.to_csv(index=False).encode('utf-8')
                     csv_data = convert_df_to_csv(export_df)
                     st.download_button(label="Download Analyzed Data as CSV", data=csv_data, file_name="terra_analysis_results.csv", mime="text/csv", key="download_csv_button")
-                elif st.session_state.get('analysis_triggered') : st.info("No analyzed data available for export (result might be empty).")
+                elif st.session_state.get('analysis_triggered') : st.info("No analyzed data available for export.")
             else: st.info("Analyzed data will be available for export here after analysis is run.")
 
         with tab_console:
@@ -1056,69 +1200,49 @@ def main():
 
         with tab_info:
             st.subheader("Understanding the Calculations, Data & Conversions")
+            # --- START: UPDATED MARKDOWN BLOCK ---
             st.markdown("""
             This section explains how the parish area figures are calculated and provides useful unit conversions.
 
             **1. How Geographic Areas are Calculated:**
-
-            The areas of geographical units like Barbados's parishes are usually calculated using **Geographic Information Systems (GIS)**. Here's a simplified overview:
-
-            * **Data Source:** The process starts with a digital map. This map data can come from various sources:
-                * *Official Government Surveys:* National land and survey departments often provide the most authoritative boundary data.
-                * *OpenStreetMap (OSM):* As used in this app, this is a collaborative, open-source mapping project. Its data is constantly updated but can sometimes vary from official sources.
-                * *Satellite Imagery:* Used for tracing boundaries.
-            * **Defining Boundaries:** Parishes are represented as **polygons** (shapes) on the map, defined by coordinates.
-            * **Map Projections:** The Earth is 3D, maps are 2D. A **map projection** translates coordinates. This app uses `EPSG:4326` (WGS 84 - standard latitude/longitude) for display and `EPSG:32620` (UTM Zone 20N) for calculations (like area and distance) because it's better suited for measuring in meters in Barbados. *This choice influences the final area numbers.*
-            * **Area Calculation:** GIS software calculates the area within each polygon using the chosen projection. The app calculates `area_sqkm` by projecting to `EPSG:32620` and calculating the geometric area.
-            * **Why Differences Occur:** Figures can differ due to:
-                * Variations in mapped boundaries (OSM vs. Official).
-                * Different map projections used.
-                * Inclusion/exclusion of small features.
-                * Data update cycles.
+            * **Data Source:** Primarily OpenStreetMap (OSM), a collaborative open-source map.
+            * **Defining Boundaries:** Parishes are represented as **polygons**.
+            * **Map Projections:** Uses `EPSG:32620` (UTM Zone 20N) for calculations (meters) and `EPSG:4326` (WGS 84) for display.
+            * **Area Calculation:** Calculates `area_sqkm` using the projected geometry.
+            * **Why Differences Occur:** Due to boundary variations (OSM vs. Official), projections, etc.
 
             **2. Key Data Processing Steps in this App:**
-
-            * **Parish Loading:** Attempts to load Parish boundaries primarily from OpenStreetMap (OSM) or a local GeoJSON file as a fallback.
-            * **Parish Cleaning:** Standardizes Parish names from your uploaded file and the map data (e.g., 'St. James' becomes 'Saint James') for better matching.
-            * **Geocoding:** Matches properties to parishes based on the cleaned names and assigns a *central point (centroid)* within the matched parish as the property's location. **Note:** This is a *parish-level* geocoding, not a precise address-point geocoding.
-            * **Area Calculation:** Calculates parish area in square kilometers (`area_sqkm`) using the `EPSG:32620` projection.
-            * **Distance Calculation:** Calculates distance to the nearest beach (`beach_dist_m`) using `EPSG:32620`.
-            * **Tourism Count:** Counts tourism points within a 2km radius, also using `EPSG:32620`.
-            * **Size Parsing:** Converts the 'Size' column from your file into square feet (`Size_sqft`), handling 'acres' and 'sq ft' units.
+            * **Parish Loading & Cleaning:** Loads from OSM/GeoJSON, standardizes names.
+            * **Geocoding:** Matches properties to parishes and assigns *parish centroids* (not exact addresses).
+            * **Spatial Calculations:** Area, Beach Distance (nearest point via KDTree), Tourism Count (2km buffer).
+            * **Size Parsing:** Converts 'Size' to square feet.
+            * **Haversine Distance Calculator (Sidebar):** This tool uses the **Haversine formula** to calculate the 'as-the-crow-flies' (great-circle) distance between two user-input coordinate points. It provides a quick estimate of direct proximity but **does not calculate road/travel distance or account for terrain**. It's a cost-effective way to get basic distance estimates without relying on external APIs.
 
             **3. Important Unit Conversions:**
-
-            * **Square Kilometers (km²) to Square Miles (sq mi):**
-                * `1 km² ≈ 0.386102 sq mi`
-            * **Square Kilometers (km²) to Hectares (ha):**
-                * `1 km² = 100 ha`
-            * **Square Kilometers (km²) to Acres:**
-                * `1 km² ≈ 247.105 acres`
-            * **Acres to Square Feet (sq ft):**
-                * `1 acre = 43,560 sq ft`
-            * **Meters (m) to Kilometers (km):**
-                * `1 km = 1,000 m`
-            * **Meters (m) to Miles (mi):**
-                * `1 mi ≈ 1609.34 m`
+            * `1 km² ≈ 0.386102 sq mi`
+            * `1 km² = 100 ha`
+            * `1 km² ≈ 247.105 acres`
+            * `1 acre = 43,560 sq ft`
+            * `1 km = 1,000 m`
+            * `1 km ≈ 0.621371 miles`
 
             **4. Data Source & Limitations:**
-
-            * **Primary Geo Source:** OpenStreetMap (OSM). Data quality can vary.
-            * **Geocoding Accuracy:** Property locations are based on *parish centroids*, not specific addresses.
-            * **Calculations:** Based on available OSM data and specific projections; may differ from official land survey figures.
-            * **Uploaded Data:** The accuracy of the analysis heavily depends on the quality and format of your uploaded property file.
+            * **Primary Geo Source:** OpenStreetMap (OSM). Quality can vary.
+            * **Geocoding Accuracy:** Parish centroids, not specific addresses.
+            * **Calculations:** Based on OSM data and specific projections.
+            * **Uploaded Data:** Accuracy depends on your file.
             """)
+            # --- END: UPDATED MARKDOWN BLOCK ---
             st.markdown("---")
             st.write("Raw OSM Parish Data (if loaded):")
             if hasattr(dashboard_instance, 'raw_parishes_from_osm') and not dashboard_instance.raw_parishes_from_osm.empty:
                 st.dataframe(dashboard_instance.raw_parishes_from_osm.drop(columns='geometry', errors='ignore'))
-            else:
-                st.info("Raw OSM parish data was not loaded or is empty.")
+            else: st.info("Raw OSM parish data was not loaded or is empty.")
 
-        if st.session_state.get('error_during_analysis'): st.error("An error occurred during the last analysis. Please review the console log in the 'Console Log' tab.")
+        if st.session_state.get('error_during_analysis'): st.error("An error occurred during the last analysis. Review the 'Console Log' tab.")
 
     elif st.session_state.get('analysis_triggered', False) and st.session_state.get('error_during_analysis', False):
-        st.error("Analysis failed. Check the console log if available from a partial run.")
+        st.error("Analysis failed. Check the console log if available.")
         if st.session_state.get('dashboard_logic_instance') and hasattr(st.session_state.dashboard_logic_instance, 'log_capture') and st.session_state.dashboard_logic_instance.log_capture:
             st.subheader("Partial Analysis Log")
             log_content = "".join(st.session_state.dashboard_logic_instance.log_capture)
