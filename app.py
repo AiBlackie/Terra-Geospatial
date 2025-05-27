@@ -949,8 +949,8 @@ def main():
         if st.session_state.get('analysis_done') and dashboard_instance: # Check instance exists
             st.markdown("---")
             st.header("Locate on Map")
-            lat_val = st.session_state.get('map_center_lat_input', 13.1939)
-            lon_val = st.session_state.get('map_center_lon_input', -59.5432)
+            lat_val = st.session_state.get('map_center_lat_input', 13.1731)
+            lon_val = st.session_state.get('map_center_lon_input', -59.6369)
             zoom_val = st.session_state.get('map_zoom_input', 14)
 
             lat_input = st.number_input("Latitude:", value=lat_val, format="%.6f", key="lat_input_widget")
@@ -1041,12 +1041,12 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Point 1")
-            lat1_input = st.number_input("Start Latitude:", value=13.1939, format="%.6f", key="dist_lat1")
-            lon1_input = st.number_input("Start Longitude:", value=-59.5432, format="%.6f", key="dist_lon1")
+            lat1_input = st.number_input("Start Latitude:", value=13.1731, format="%.6f", key="dist_lat1")
+            lon1_input = st.number_input("Start Longitude:", value=-59.6369, format="%.6f", key="dist_lon1")
         with col2:
             st.subheader("Point 2")
-            lat2_input = st.number_input("End Latitude:", value=13.0667, format="%.6f", key="dist_lat2")
-            lon2_input = st.number_input("End Longitude:", value=-59.6167, format="%.6f", key="dist_lon2")
+            lat2_input = st.number_input("End Latitude:", value=13.0801, format="%.6f", key="dist_lat2")
+            lon2_input = st.number_input("End Longitude:", value=-59.4876, format="%.6f", key="dist_lon2")
 
         calc_dist_button = st.button("Calculate Distance Between Points", use_container_width=True)
 
