@@ -8,6 +8,6 @@ scipy
 matplotlib
 numpy
 Pillow
-openai
+openai==0.28.0
 requests
 openpyxl
