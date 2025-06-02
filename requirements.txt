@@ -9,3 +9,5 @@ matplotlib
 numpy
 Pillow
 openpyxl
+request
+openai==0.28.0
