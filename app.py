@@ -28,8 +28,9 @@ ox.settings.log_console = False
 ox.settings.use_cache = True
 ox.settings.timeout = 600
 
-# OpenAI API Key (assuming it's in secrets or environment)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+# --- Key Setup ---
+# This pattern works on Cloud Run (using environment variables) and locally (using secrets.toml)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
 else:
