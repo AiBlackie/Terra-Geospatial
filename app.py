@@ -29,7 +29,7 @@ ox.settings.use_cache = True
 ox.settings.timeout = 600
 
 # OpenAI API Key (assuming it's in secrets or environment)
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
 else:
@@ -1079,7 +1079,7 @@ def main():
     with st.sidebar:
         st.image(LOGO_URL, width=200) # Correct usage of LOGO_URL
 
-        WEATHER_API_KEY = st.secrets.get("OPENWEATHERMAP_API_KEY") 
+        WEATHER_API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY") or st.secrets.get("OPENWEATHERMAP_API_KEY") 
         
         if WEATHER_API_KEY:
             weather_data = get_weather_data(WEATHER_API_KEY, city="Bridgetown,BB") 
