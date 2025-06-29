@@ -22,6 +22,7 @@ import datetime
 import math
 import openai # Ensure openai is imported
 import requests # Added for weather API calls
+from collections import OrderedDict # Added for ordered dictionary in display_cols
 
 # OSMnx settings
 ox.settings.log_console = False
@@ -37,6 +38,24 @@ else:
     # Add a message in the app if the key is missing, but don't block execution
     pass
 
+# --- Global Mapping for GeoJSON 'id' fallback (if needed) ---
+# This map assumes a GeoJSON with 'id' field that corresponds to OBJECTID in your Excel.
+# This is a fallback if the primary local files (Shapefile/GeoPackage) don't work
+# or if you specifically use a GeoJSON that only has numeric IDs.
+PARISH_ID_TO_NAME_MAP = {
+    1: "Saint Lucy",
+    2: "Saint Andrew",
+    3: "Saint Joseph",
+    4: "Saint John",
+    5: "Saint Philip",
+    6: "Saint George",
+    7: "Christ Church",
+    8: "Saint Peter",
+    9: "Saint Thomas",
+    10: "Saint Michael",
+    11: "Saint James"
+}
+
 
 # --- Helper functions ---
 
@@ -47,12 +66,12 @@ def get_weather_data(api_key, city="Bridgetown,BB"):
     complete_url = f"{base_url}?q={city}&appid={api_key}&units=metric"
     try:
         response = requests.get(complete_url, timeout=10)
-        response.raise_for_status() 
+        response.raise_for_status()
         data = response.json()
         
         main = data.get("main")
         weather_list = data.get("weather")
-        wind = data.get("wind") 
+        wind = data.get("wind")
         
         if main and weather_list:
             weather_info = weather_list[0]
@@ -77,7 +96,7 @@ def get_weather_data(api_key, city="Bridgetown,BB"):
             return None
     except requests.exceptions.RequestException:
         return None
-    except Exception: 
+    except Exception:
         return None
 
 def parse_size_to_sqft_static(size_str):
@@ -88,7 +107,7 @@ def parse_size_to_sqft_static(size_str):
     except ValueError: return np.nan
     if 'acre' in unit_str: return num_val * 43560
     if ('sq' in unit_str and ('ft' in unit_str or 'feet' in unit_str)) or 'sf' in unit_str: return num_val
-    if unit_str == "" and num_val > 200: return num_val 
+    if unit_str == "" and num_val > 200: return num_val
     return np.nan
 
 def standardize_property_type_static(pt_series_input):
@@ -142,9 +161,9 @@ def clean_parish_name_generic_static(name_val):
     if pd.isna(name_val): return None
     s = str(name_val).strip()
     if not s or s.lower() in ['nan', 'none']: return None
-    s_normalized = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn'); s_titled = s_normalized.title()
+    s_normalized = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn').title()
     replacements = {'St.': 'Saint', 'St ': 'Saint ', 'St. ': 'Saint ', 'St': 'Saint','Christchurch': 'Christ Church','Parish Of Saint Michael': 'Saint Michael', 'Parish Of Christ Church': 'Christ Church','Parish Of Saint James': 'Saint James', 'Parish Of Saint Lucy': 'Saint Lucy','Parish Of Saint Peter': 'Saint Peter', 'Parish Of Saint Andrew': 'Saint Andrew','Parish Of Saint Joseph': 'Saint Joseph', 'Parish Of Saint Thomas': 'Saint Thomas','Parish Of Saint John': 'Saint John', 'Parish Of Saint George': 'Saint George','Parish Of Saint Philip': 'Saint Philip',}
-    cleaned_s = s_titled
+    cleaned_s = s_normalized
     for old, new in replacements.items(): cleaned_s = cleaned_s.replace(old, new)
     for saint_parish_base in ['Lucy', 'Peter', 'Andrew', 'Joseph', 'John', 'George', 'Thomas', 'Philip', 'Michael', 'James']:
         if (f' {saint_parish_base}' in cleaned_s or cleaned_s.endswith(saint_parish_base) or cleaned_s == saint_parish_base) and \
@@ -265,7 +284,7 @@ def get_cached_geodata(log_capture_list_ref):
             name_col_candidates = ['name', 'official_name', 'name:en', 'alt_name', 'loc_name']
             primary_name_col_found = next((col for col in name_col_candidates if col in parishes_gdf_temp.columns), None)
             if primary_name_col_found:
-                   parishes_gdf_temp['OSM_Parish_Name'] = parishes_gdf_temp[primary_name_col_found].fillna('Unnamed Parish')
+                    parishes_gdf_temp['OSM_Parish_Name'] = parishes_gdf_temp[primary_name_col_found].fillna('Unnamed Parish')
             else: parishes_gdf_temp['OSM_Parish_Name'] = parishes_gdf_temp.index.astype(str).fillna('Unnamed Parish')
             parishes_gdf_temp['name'] = parishes_gdf_temp['OSM_Parish_Name'].apply(clean_parish_name_generic_static)
             parishes_gdf_temp = parishes_gdf_temp[['name', 'OSM_Parish_Name', 'geometry']].copy()
@@ -299,7 +318,7 @@ def get_cached_geodata(log_capture_list_ref):
             log_capture_list_ref.append("Downloading road network for Barbados from OSM...\n")
             graph_roads = ox.graph_from_polygon(poly, network_type="drive", retain_all=False, truncate_by_edge=True)
             _, edges_gdf = ox.graph_to_gdfs(graph_roads)
-            roads_gdf_temp = edges_gdf[['geometry', 'name', 'highway', 'length']].copy() 
+            roads_gdf_temp = edges_gdf[['geometry', 'name', 'highway', 'length']].copy()
             if not roads_gdf_temp.empty:
                 roads_gdf_temp = roads_gdf_temp[roads_gdf_temp.geometry.notna() & roads_gdf_temp.geometry.is_valid]
                 results_dict["roads_gdf"] = roads_gdf_temp
@@ -313,40 +332,147 @@ def get_cached_geodata(log_capture_list_ref):
         log_capture_list_ref.append(f"General error in get_geodata: {e}\n{traceback.format_exc()}\n")
         return tuple(results_dict[k] for k in gdf_keys_order)
 
-@st.cache_data(show_spinner=False, persist="disk")
+
+@st.cache_data(show_spinner=False, persist="disk") # Re-enabling caching after debugging
 def get_cached_alternative_parish_data(log_capture_list_ref):
     log_capture_list_ref.append("Executing get_cached_alternative_parish_data...\n")
     parishes_alt = gpd.GeoDataFrame()
-    try:
-        log_capture_list_ref.append("Attempting to load parish data from local file 'barbados_parishes.geojson'...\n")
-        script_dir = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
-        possible_paths = ["barbados_parishes.geojson", os.path.join(script_dir, "barbados_parishes.geojson")]
-        found_path = next((p for p in possible_paths if os.path.exists(p)), None)
-        if not found_path: log_capture_list_ref.append("Local parish file 'barbados_parishes.geojson' not found.\n"); return parishes_alt
-        parishes_alt = gpd.read_file(found_path); log_capture_list_ref.append(f"Loaded local parishes: {found_path}\n")
+    found_path = None
+    file_type_used = "None"
+
+    script_dir = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
+    
+    # --- PRIORITY 1: Shapefile from screenshot name (Parishes.shp) ---
+    shapefile_path = os.path.join(script_dir, "Parishes.shp") # Explicitly checking for "Parishes.shp"
+    if os.path.exists(shapefile_path):
+        log_capture_list_ref.append(f"Attempting to load parish data from local Shapefile: {shapefile_path}\n")
+        try:
+            parishes_alt = gpd.read_file(shapefile_path)
+            found_path = shapefile_path
+            file_type_used = "Shapefile (Parishes.shp)"
+            log_capture_list_ref.append(f"Successfully loaded parish data from local Shapefile: {shapefile_path}\n")
+        except Exception as e:
+            log_capture_list_ref.append(f"ERROR: Failed to load Shapefile '{shapefile_path}'. Error: {e}\n{traceback.format_exc()}\n")
+            # If shapefile fails, parishes_alt remains empty, and we continue to try other formats
+            pass
+
+    # --- PRIORITY 2: Other GeoJSON from screenshot names (only if Shapefile not loaded successfully) ---
+    if parishes_alt.empty: # Only try these if the Shapefile load failed
+        # Check for the long-named GeoJSON from screenshot
+        long_name_geojson_path = os.path.join(script_dir, "ParishBoundaries__8337461374265783210.geojson")
+        if os.path.exists(long_name_geojson_path):
+            log_capture_list_ref.append(f"Attempting to load parish data from local specific GeoJSON: {long_name_geojson_path}\n")
+            try:
+                parishes_alt = gpd.read_file(long_name_geojson_path)
+                found_path = long_name_geojson_path
+                file_type_used = "Specific GeoJSON (Long Name)"
+                log_capture_list_ref.append(f"Successfully loaded parish data from local specific GeoJSON: {long_name_geojson_path}\n")
+            except Exception as e:
+                log_capture_list_ref.append(f"ERROR: Failed to load GeoJSON '{long_name_geojson_path}'. Error: {e}\n{traceback.format_exc()}\n")
+                pass
+
+    # --- PRIORITY 3: The 'old' GeoJSON from screenshot name (only if previous attempts failed) ---
+    if parishes_alt.empty: # Only try this if previous attempts failed
+        old_geojson_path = os.path.join(script_dir, "oldbarbados_parishes.geojson")
+        if os.path.exists(old_geojson_path):
+            log_capture_list_ref.append(f"Attempting to load parish data from local old GeoJSON: {old_geojson_path}\n")
+            try:
+                parishes_alt = gpd.read_file(old_geojson_path)
+                found_path = old_geojson_path
+                file_type_used = "Old GeoJSON"
+                log_capture_list_ref.append(f"Successfully loaded parish data from local old GeoJSON: {old_geojson_path}\n")
+            except Exception as e:
+                log_capture_list_ref.append(f"ERROR: Failed to load GeoJSON '{old_geojson_path}'. Error: {e}\n{traceback.format_exc()}\n")
+                pass
+
+    # --- PRIORITY 4: Original problematic 'barbados_parishes.geojson' (with ID mapping fallback) ---
+    if parishes_alt.empty: # Only try this if all previous attempts failed
+        problematic_geojson_path = os.path.join(script_dir, "barbados_parishes.geojson")
+        if os.path.exists(problematic_geojson_path):
+            log_capture_list_ref.append(f"Attempting to load parish data from local problematic GeoJSON: {problematic_geojson_path} (will try ID mapping)\n")
+            try:
+                parishes_alt = gpd.read_file(problematic_geojson_path)
+                found_path = problematic_geojson_path
+                file_type_used = "Problematic GeoJSON (ID mapping fallback)"
+                log_capture_list_ref.append(f"Successfully loaded parish data from local problematic GeoJSON: {problematic_geojson_path} (will try ID mapping)\n")
+            except Exception as e:
+                log_capture_list_ref.append(f"ERROR: Failed to load GeoJSON '{problematic_geojson_path}'. Error: {e}\n{traceback.format_exc()}\n")
+                pass
+    
+    if parishes_alt.empty: # If no local file could be loaded successfully
+        log_capture_list_ref.append("No local parish file could be successfully loaded. Returning empty GeoDataFrame for local parishes.\n")
+        return parishes_alt # Return empty if no file found or loaded successfully
+
+    # --- Proceed with processing the loaded parishes_alt if it's not empty ---
+    if not parishes_alt.empty:
+        log_capture_list_ref.append(f"Attempting to process loaded {file_type_used} data attributes.\n")
         primary_name_col = None
-        if 'name' in parishes_alt.columns: primary_name_col = 'name'
-        elif 'Name' in parishes_alt.columns: primary_name_col = 'Name'
-        elif 'parish' in parishes_alt.columns: primary_name_col = 'parish'
-        if primary_name_col and primary_name_col != 'name': parishes_alt.rename(columns={primary_name_col: 'name'}, inplace=True)
-        if 'name' not in parishes_alt.columns: log_capture_list_ref.append("Error: No suitable name column in local GeoJSON.\n"); return gpd.GeoDataFrame()
+        # Candidates for the parish name column in order of preference.
+        # Added 'PARISH' as it's common in shapefiles, and increased general robustness.
+        # Added 'NAME' for strict match to your Excel data, and 'loc_name', 'ADMIN_NAME', 'NAME_EN' are also common.
+        name_col_candidates = ['name', 'Name', 'PARISH', 'NAME', 'parish', 'Parish Name', 'ADMIN_NAME', 'NAME_EN', 'loc_name']
+        primary_name_col = next((col for col in name_col_candidates if col in parishes_alt.columns), None)
+
+        if primary_name_col is None:
+            # If still no name column, and it's a GeoJSON, try the ID mapping
+            if 'id' in parishes_alt.columns and "GeoJSON" in file_type_used:
+                log_capture_list_ref.append("No explicit name column found in GeoJSON properties. Attempting to map 'id' to parish names.\n")
+                parishes_alt['name'] = parishes_alt['id'].map(PARISH_ID_TO_NAME_MAP)
+                if parishes_alt['name'].notna().any():
+                    primary_name_col = 'name'
+                    log_capture_list_ref.append("Successfully mapped 'id' to 'name' for some GeoJSON parishes.\n")
+                else:
+                    log_capture_list_ref.append("Mapping 'id' to 'name' failed or resulted in all 'N/A' names for GeoJSON. Data may be incomplete.\n")
+                    # Fallback to string ID if map fails even for ID-only GeoJSON
+                    parishes_alt['name'] = parishes_alt['id'].astype(str)
+                    primary_name_col = 'name'
+            else: # If it's a Shapefile/GeoPackage or a GeoJSON where ID mapping failed, it's a critical failure for this file
+                log_capture_list_ref.append(f"Error: No suitable name column found in {file_type_used} properties. Local parish data is unusable. Columns found: {parishes_alt.columns.tolist()}\n")
+                return gpd.GeoDataFrame() # Return empty if name column is genuinely missing in a good format
+
+        # Ensure the 'name' column exists and is used for cleaning
+        if primary_name_col and primary_name_col != 'name':
+            parishes_alt.rename(columns={primary_name_col: 'name'}, inplace=True)
+        
+        # Now explicitly convert the 'name' column to string type before cleaning
+        # This is the crucial fix for the 'AttributeError: 'str' object has no attribute 'tz_localize''
+        parishes_alt['name'] = parishes_alt['name'].astype(str)
+        log_capture_list_ref.append("Ensured 'name' column is string type before cleaning.\n")
+
+        # Final check for 'name' column after all attempts
+        if 'name' not in parishes_alt.columns or parishes_alt['name'].isnull().all():
+            log_capture_list_ref.append("Critical Error: After all processing, no valid 'name' column could be established for local parish data.\n");
+            return gpd.GeoDataFrame() # Return empty if no name column found after all attempts
+        
         problematic_strings_to_none = ['nan', 'NaN', 'Nan', 'NONE', 'None', 'none', '', 'null', 'NULL', '<NA>']
         parishes_alt['name'] = parishes_alt['name'].replace(problematic_strings_to_none, None, regex=False)
         parishes_alt['OSM_Parish_Name'] = parishes_alt['name'].copy()
         parishes_alt['name'] = parishes_alt['name'].apply(clean_parish_name_generic_static)
         parishes_alt = parishes_alt[parishes_alt.geometry.is_valid & parishes_alt.geometry.notna()]
-        if parishes_alt.empty: log_capture_list_ref.append("No valid GeoJSON geometries after validation.\n"); return gpd.GeoDataFrame()
-        if parishes_alt.crs is None: parishes_alt.set_crs("EPSG:4326", inplace=True)
+        if parishes_alt.empty:
+            log_capture_list_ref.append("No valid local geometries after validation.\n");
+            return gpd.GeoDataFrame()
+        
+        # Set CRS if it's missing (common for local files)
+        if parishes_alt.crs is None:
+            parishes_alt.set_crs("EPSG:4326", inplace=True)
+            log_capture_list_ref.append("Set CRS of local parish data to EPSG:4326 (WGS84).\n")
+        elif parishes_alt.crs != "EPSG:4326":
+            parishes_alt = parishes_alt.to_crs("EPSG:4326")
+            log_capture_list_ref.append(f"Converted CRS of local parish data to EPSG:4326 (WGS84) from {parishes_alt.crs}.\n")
+
         final_alt_cols = ['name', 'OSM_Parish_Name', 'geometry']; existing_final_cols = [col for col in final_alt_cols if col in parishes_alt.columns]
         for col_ensure in ['name', 'OSM_Parish_Name']:
             if col_ensure not in parishes_alt.columns:
                 parishes_alt[col_ensure] = pd.Series([None] * len(parishes_alt), index=parishes_alt.index)
                 if col_ensure not in existing_final_cols: existing_final_cols.append(col_ensure)
         return parishes_alt[existing_final_cols]
-    except Exception as e: log_capture_list_ref.append(f"Error alt parish data: {e}\n{traceback.format_exc()}\n"); return parishes_alt
+    else: # This else block should technically not be reached if parishes_alt.empty is checked at the top
+        return gpd.GeoDataFrame()
+
 
 class TerraDashboardLogic:
-    def __init__(self, uploaded_file_object=None):
+    def __init__(self):
         self.analyzed_properties = gpd.GeoDataFrame()
         self.parishes = gpd.GeoDataFrame()
         self.beaches = gpd.GeoDataFrame()
@@ -361,27 +487,35 @@ class TerraDashboardLogic:
         self.stats_data_for_streamlit = []
         self.log_capture = []
         self.raw_parishes_from_osm = gpd.GeoDataFrame()
-        self.uploaded_file_object = uploaded_file_object
         self.parish_summary_df = pd.DataFrame()
         self.ai_parish_road_assessment_text = None
-        self.ai_parish_property_assessment_text = None 
+        self.ai_parish_property_assessment_text = None
 
     def _capture_print(self, message): self.log_capture.append(str(message) + "\n")
 
     def _load_property_data(self):
-        if self.uploaded_file_object:
-            return load_cached_property_data(self.uploaded_file_object.getvalue(), self.uploaded_file_object.name, self.log_capture)
-        return pd.DataFrame()
+        # --- MODIFIED TO AUTOMATICALLY LOAD THE EXCEL FILE ---
+        file_path = "Terra Caribbean NEW SAMPLE R.xlsx"
+        self._capture_print(f"Attempting to automatically load property data from: {file_path}")
 
+        if not os.path.exists(file_path):
+            self._capture_print(f"CRITICAL ERROR: The required data file was not found at '{file_path}'.")
+            self._capture_print("Please ensure the file is in the same directory as the script.")
+            # Let the calling function handle the empty dataframe
+            return pd.DataFrame()
+
+        try:
+            with open(file_path, "rb") as f:
+                file_content_bytes = f.read()
+            self._capture_print(f"Successfully read file: {file_path}")
+            return load_cached_property_data(file_content_bytes, file_path, self.log_capture)
+        except Exception as e:
+            self._capture_print(f"CRITICAL ERROR: Failed to read or process the data file '{file_path}'. Error: {e}\n{traceback.format_exc()}")
+            # Let the calling function handle the empty dataframe
+            return pd.DataFrame()
 
     def _get_geodata(self):
-        parishes, beaches, tourism, features, raw_osm, schools, supermarkets, roads, island_area = get_cached_geodata(self.log_capture)
-        self.raw_parishes_from_osm = raw_osm
-        self.schools = schools
-        self.supermarkets = supermarkets
-        self.roads = roads
-        self.total_island_area_sqkm = island_area
-        return parishes, beaches, tourism, features
+        return get_cached_geodata(self.log_capture)
 
     def run_analysis_streamlit(self):
         self.log_capture = []
@@ -390,12 +524,19 @@ class TerraDashboardLogic:
             self._capture_print("\nLoading property data...")
             properties = self._load_property_data()
             if properties.empty: self._capture_print("No properties loaded. Aborting."); return False
-            self._capture_print(f"\nLoaded and initially processed {len(properties)} properties")
+            self._capture_print(f"\nLoaded and initially processed {len(properties)} properties.")
 
-            self._capture_print("\nDownloading/Loading geospatial data...")
-            primary_parishes, self.beaches, self.tourism_points, self.feature_polygons = self._get_geodata()
+            self._capture_print("\nLoading parish data (prioritizing local files)...")
+            local_parishes = get_cached_alternative_parish_data(self.log_capture)
+            
+            if not local_parishes.empty:
+                self.parishes = local_parishes
+                self._capture_print(f"Successfully loaded {len(self.parishes)} parishes from local file.")
+                _, self.beaches, self.tourism_points, self.feature_polygons, self.raw_parishes_from_osm, self.schools, self.supermarkets, self.roads, self.total_island_area_sqkm = self._get_geodata()
+            else:
+                self._capture_print("No local parish data found or usable. Attempting to download from OSM instead.")
+                self.parishes, self.beaches, self.tourism_points, self.feature_polygons, self.raw_parishes_from_osm, self.schools, self.supermarkets, self.roads, self.total_island_area_sqkm = self._get_geodata()
 
-            self.parishes = primary_parishes if not primary_parishes.empty else self._get_alternative_parish_data()
             if self.parishes.empty: self._capture_print("CRITICAL: All parish geospatial data sources failed. Aborting."); return False
 
             if not self.parishes.empty and 'geometry' in self.parishes.columns:
@@ -403,11 +544,13 @@ class TerraDashboardLogic:
                 if 'OSM_Parish_Name' not in self.parishes.columns and 'name' in self.parishes.columns:
                     self.parishes['OSM_Parish_Name'] = self.parishes['name']
                 elif 'OSM_Parish_Name' not in self.parishes.columns:
-                        self.parishes['OSM_Parish_Name'] = 'Unknown Parish'
+                    self.parishes['OSM_Parish_Name'] = 'Unknown Parish'
                 if 'name' not in self.parishes.columns:
                     self.parishes['name'] = self.parishes['OSM_Parish_Name'].apply(clean_parish_name_generic_static)
+                
                 self.parishes['OSM_Parish_Name'] = self.parishes['OSM_Parish_Name'].fillna('Unknown Parish').astype(str)
                 self.parishes['name'] = self.parishes['name'].fillna(self.parishes['OSM_Parish_Name']).astype(str)
+                
                 try:
                     if self.parishes.crs is None: self.parishes.set_crs("EPSG:4326", inplace=True)
                     parishes_projected = self.parishes.to_crs("EPSG:32620")
@@ -416,7 +559,6 @@ class TerraDashboardLogic:
                 except Exception as e:
                     self._capture_print(f"Error projecting parishes for area calculation: {e}"); self.parishes['area_sqkm'] = np.nan
             else: self.parishes['area_sqkm'] = np.nan
-
 
             self._capture_print("\nGeocoding properties...");
             geo_properties = self.geocode_properties_internal(properties, self.parishes.copy())
@@ -441,7 +583,7 @@ class TerraDashboardLogic:
             if 'name' not in parishes_gdf_in.columns and 'OSM_Parish_Name' in parishes_gdf_in.columns:
                 parishes_gdf_in['name'] = parishes_gdf_in['OSM_Parish_Name']
             elif 'name' not in parishes_gdf_in.columns:
-                   self._capture_print("CRIT ERROR: No suitable 'name' or 'OSM_Parish_Name' in parishes_gdf for join."); return gpd.GeoDataFrame()
+                self._capture_print("CRIT ERROR: No suitable 'name' or 'OSM_Parish_Name' in parishes_gdf for join."); return gpd.GeoDataFrame()
             def create_join_key(s_series): return s_series.astype(str).str.lower().str.replace(r'[^a-z0-9\s]','',regex=True).str.replace(r'\s+',' ',regex=True).str.strip()
             df_props['Parish_join_key'] = create_join_key(df_props['Parish'])
             parishes_gdf_in['name_join_key'] = create_join_key(parishes_gdf_in['name'])
@@ -542,22 +684,36 @@ class TerraDashboardLogic:
         m = folium.Map(location=[map_lat, map_lon], zoom_start=map_zoom, tiles="Stamen Terrain", attr='Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL.')
         folium.TileLayer("OpenTopoMap", name="Topographic Detail", show=False, attr='Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)').add_to(m)
         folium.TileLayer("CartoDB positron", name="Light Base Map", show=False, attr='&copy; OpenStreetMap contributors &copy; CARTO').add_to(m)
+        
         if not all_parishes_gdf.empty and 'name' in all_parishes_gdf.columns and 'geometry' in all_parishes_gdf.columns:
             parishes_4326 = all_parishes_gdf.to_crs("EPSG:4326")[all_parishes_gdf.geometry.is_valid & all_parishes_gdf.geometry.notna()]
             if not parishes_4326.empty:
                 parish_boundary_layer = folium.FeatureGroup(name="Parish Boundaries & Centers", show=True).add_to(m)
-                folium.GeoJson(parishes_4326,style_function=lambda x: {'fillColor':'#D3D3D3','color':'#333333','weight':1.5,'fillOpacity':0.3},
-                                       highlight_function=lambda x: {'weight':3, 'color':'#555555', 'fillOpacity':0.5},
-                                       tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
-                                     ).add_to(parish_boundary_layer)
+                
+                folium.GeoJson(parishes_4326,
+                                     style_function=lambda x: {'fillColor':'#B3CDE3', 'color':'#00008B', 'weight':1.8, 'fillOpacity':0.6},
+                                     highlight_function=lambda x: {'weight':3, 'color':'#0000CD', 'fillOpacity':0.7},
+                                     tooltip=folium.GeoJsonTooltip(fields=['name'], aliases=['<b>Parish:</b>'], style=("background-color:white;color:black;font-family:Arial;font-size:12px;padding:5px;border-radius:3px;box-shadow:3px 3px 5px grey;"),sticky=True)
+                                    ).add_to(parish_boundary_layer)
+                
                 for _, parish_row in parishes_4326.iterrows():
                     name_display = parish_row['name']
                     try:
                         if parish_row.geometry.is_empty or not parish_row.geometry.is_valid: continue
                         centroid = parish_row.geometry.centroid;
                         if centroid.is_empty: continue
-                        folium.CircleMarker(location=[centroid.y, centroid.x], radius=3, color='#4A4A4A', weight=1, fill=True, fill_color='#808080', fill_opacity=0.5, tooltip=f"<b>{name_display}</b> (Center)").add_to(parish_boundary_layer)
+                        folium.CircleMarker(
+                            location=[centroid.y, centroid.x],
+                            radius=3,
+                            color='black',
+                            weight=1,
+                            fill=True,
+                            fill_color='yellow',
+                            fill_opacity=1,
+                            tooltip=f"<b>{name_display}</b> (Center)"
+                        ).add_to(parish_boundary_layer)
                     except Exception: pass
+        
         if not feature_polygons.empty and 'name' in feature_polygons.columns and 'geometry' in feature_polygons.columns:
             feature_polygons_4326 = feature_polygons.to_crs("EPSG:4326")[feature_polygons.geometry.is_valid & feature_polygons.geometry.notna() & feature_polygons['name'].notna()]
             if not feature_polygons_4326.empty:
@@ -604,8 +760,8 @@ class TerraDashboardLogic:
                 road_network_layer = folium.FeatureGroup(name="Road Network", show=False).add_to(m)
                 road_style = {'color': '#708090', 'weight': 2, 'opacity': 0.7}
                 folium.GeoJson(roads_4326, name="Roads", style_function=lambda x: road_style,
-                               tooltip=folium.features.GeoJsonTooltip(fields=['name', 'highway'], aliases=['Road Name:', 'Type:'], sticky=False, style=("background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"))
-                             ).add_to(road_network_layer)
+                                   tooltip=folium.features.GeoJsonTooltip(fields=['name', 'highway'], aliases=['Road Name:', 'Type:'], sticky=False, style=("background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"))
+                                  ).add_to(road_network_layer)
         if not parish_summary.empty:
             parish_summary_layer = folium.FeatureGroup(name="Property Summaries by Parish", show=True).add_to(m)
             summary_display_name_col = 'OSM_Parish_Name' if 'OSM_Parish_Name' in parish_summary.columns else 'Parish'
@@ -623,7 +779,7 @@ class TerraDashboardLogic:
                 total_road_len_str = f"{p_row.get('total_road_length_km', 0):.1f} km" if pd.notna(p_row.get('total_road_length_km')) else "N/A"
                 road_density_str = f"{p_row.get('road_density_km_sqkm', 0):.2f} km/km²" if pd.notna(p_row.get('road_density_km_sqkm')) else "N/A"
                 popup_html = f"""<div style="width:320px; font-family: Arial, sans-serif; font-size: 13px; line-height: 1.4;"><h4 style="margin: 5px 0 10px 0; padding-bottom: 5px; border-bottom: 1px solid #ddd; color: #005A9C;">{p_row.get(summary_display_name_col, 'Parish Summary')} Summary</h4><table style="width: 100%; border-collapse: collapse;"><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Total Properties:</td><td style="padding: 4px; text-align: right;">{p_row['total_properties']}</td></tr><tr><td style="padding: 4px; font-weight: bold;">Parish Area:</td><td style="padding: 4px; text-align: right;">{area_str}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Property Density:</td><td style="padding: 4px; text-align: right;">{prop_density_str}</td></tr><tr><td style="padding: 4px; font-weight: bold;">For Sale:</td><td style="padding: 4px; text-align: right;">{p_row['total_for_sale']}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Residential:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_sale_res_count',0)}</td></tr><tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Commercial:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_sale_com_count',0)}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Land:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_sale_land_count',0)}</td></tr><tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Other:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_sale_oth_std_count',0)}</td></tr><tr><td style="padding: 4px; font-weight: bold;">For Rent:</td><td style="padding: 4px; text-align: right;">{p_row['total_for_rent']}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Residential:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_rent_res_count',0)}</td></tr><tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Commercial:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_rent_com_count',0)}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Land:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_rent_land_count',0)}</td></tr><tr><td style="padding: 4px; font-weight: bold; padding-left: 15px;">↳ Other:</td><td style="padding: 4px; text-align: right;">{p_row.get('for_rent_oth_std_count',0)}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Avg. Beach Dist:</td><td style="padding: 4px; text-align: right;">{beach_km_str}</td></tr><tr><td style="padding: 4px; font-weight: bold;">Avg. Attractions (2km):</td><td style="padding: 4px; text-align: right;">{avg_tour_str}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Avg. Size:</td><td style="padding: 4px; text-align: right;">{avg_sz_str}</td></tr><tr><td style="padding: 4px; font-weight: bold;">Total Road Length:</td><td style="padding: 4px; text-align: right;">{total_road_len_str}</td></tr><tr style="background-color: #f9f9f9;"><td style="padding: 4px; font-weight: bold;">Road Density:</td><td style="padding: 4px; text-align: right;">{road_density_str}</td></tr></table></div>"""
-                folium.CircleMarker(loc, radius=radius, color='#000000', weight=2, fill=True, fill_color=fill_color, fill_opacity=0.7, popup=folium.Popup(popup_html, max_width=350), tooltip=f"<b>{p_row.get(summary_display_name_col, 'Parish')}</b><br>Total Data Properties: {p_row['total_properties']}").add_to(parish_summary_layer)
+                folium.CircleMarker(loc, radius=radius, color='#000000', weight=2, fill=True, fill_color='#FF4500', fill_opacity=0.7, popup=folium.Popup(popup_html, max_width=350), tooltip=f"<b>{p_row.get(summary_display_name_col, 'Parish')}</b><br>Total Data Properties: {p_row['total_properties']}").add_to(parish_summary_layer)
         if center_lat is not None and center_lon is not None and st.session_state.get('location_explicitly_set', False):
             folium.Marker(location=[center_lat, center_lon],popup=f"Located: {center_lat:.4f}, {center_lon:.4f}",tooltip="Your Location",icon=folium.Icon(color="red", icon="star")).add_to(m)
         folium.LayerControl().add_to(m)
@@ -644,11 +800,11 @@ class TerraDashboardLogic:
             
             group_by_col_summary = 'OSM_Parish_Name'
             if group_by_col_summary not in analyzed_gdf.columns or analyzed_gdf[group_by_col_summary].isnull().all():
-                   group_by_col_summary = 'Parish' 
+                group_by_col_summary = 'Parish'
             
-            if group_by_col_summary not in analyzed_gdf.columns or analyzed_gdf[group_by_col_summary].isnull().all(): 
-                   self._capture_print(f"CRITICAL: Cannot find a suitable parish grouping column for summary ({group_by_col_summary}). Analyzed GDF columns: {analyzed_gdf.columns}"); 
-                   self.parish_summary_df = pd.DataFrame();
+            if group_by_col_summary not in analyzed_gdf.columns or analyzed_gdf[group_by_col_summary].isnull().all():
+                self._capture_print(f"CRITICAL: Cannot find a suitable parish grouping column for summary ({group_by_col_summary}). Analyzed GDF columns: {analyzed_gdf.columns}");
+                self.parish_summary_df = pd.DataFrame();
             else:
                 analyzed_gdf[group_by_col_summary] = analyzed_gdf[group_by_col_summary].astype(str)
                 def summarize_parish(group):
@@ -660,13 +816,13 @@ class TerraDashboardLogic:
                         data[f'for_sale_{p_label.lower()}_count'] = int((is_sale & is_curr_type).sum())
                         data[f'for_rent_{p_label.lower()}_count'] = int((is_rent & is_curr_type).sum())
                     data.update({'total_for_sale': int(is_sale.sum()), 'total_for_rent': int(is_rent.sum()),
-                                 'avg_beach_dist_m': group['beach_dist_m'].mean(), 
+                                 'avg_beach_dist_m': group['beach_dist_m'].mean(),
                                  'avg_tourism_count_2km': group['tourism_count_2km'].mean(),
                                  'avg_size_sqft': group['Size_sqft'].mean(),
-                                 'avg_bedrooms': group['Bedrooms'].mean() if 'Bedrooms' in group and group['Bedrooms'].notna().any() else np.nan, 
-                                 'avg_price': group['Price'].mean() if 'Price' in group and group['Price'].notna().any() else np.nan, 
-                                 'min_price': group['Price'].min() if 'Price' in group and group['Price'].notna().any() else np.nan, 
-                                 'max_price': group['Price'].max() if 'Price' in group and group['Price'].notna().any() else np.nan, 
+                                 'avg_bedrooms': group['Bedrooms'].mean() if 'Bedrooms' in group and group['Bedrooms'].notna().any() else np.nan,
+                                 'avg_price': group['Price'].mean() if 'Price' in group and group['Price'].notna().any() else np.nan,
+                                 'min_price': group['Price'].min() if 'Price' in group and group['Price'].notna().any() else np.nan,
+                                 'max_price': group['Price'].max() if 'Price' in group and group['Price'].notna().any() else np.nan,
                                  'area_sqkm': group['area_sqkm'].iloc[0] if 'area_sqkm' in group.columns and not group['area_sqkm'].empty and pd.notna(group['area_sqkm'].iloc[0]) else np.nan})
                     if not group.empty and 'geometry' in group.columns and group['geometry'].iloc[0] is not None:
                         first_geom = group['geometry'].iloc[0]; data['latitude'], data['longitude'] = (first_geom.y, first_geom.x) if hasattr(first_geom, 'x') else (np.nan, np.nan)
@@ -677,7 +833,7 @@ class TerraDashboardLogic:
                 if not self.parish_summary_df.empty:
                     if 'area_sqkm' in self.parish_summary_df.columns and 'total_properties' in self.parish_summary_df.columns:
                         self.parish_summary_df['property_density'] = self.parish_summary_df.apply(
-                            lambda row: (row['total_properties'] / row['area_sqkm']) 
+                            lambda row: (row['total_properties'] / row['area_sqkm'])
                                         if pd.notna(row['area_sqkm']) and row['area_sqkm'] > 0 and pd.notna(row['total_properties']) and row['total_properties'] > 0
                                         else np.nan,
                             axis=1
@@ -695,14 +851,14 @@ class TerraDashboardLogic:
                     roads_proj_for_calc = self.roads.to_crs("EPSG:32620")
                     
                     if 'length' in roads_proj_for_calc.columns and 'length_m' not in roads_proj_for_calc.columns:
-                         roads_proj_for_calc.rename(columns={'length': 'length_m'}, inplace=True) 
+                        roads_proj_for_calc.rename(columns={'length': 'length_m'}, inplace=True)
                     elif 'geometry' in roads_proj_for_calc and 'length_m' not in roads_proj_for_calc.columns:
-                         roads_proj_for_calc['length_m'] = roads_proj_for_calc.geometry.length 
-                    elif 'length_m' not in roads_proj_for_calc.columns: 
-                         raise ValueError("Roads GDF missing geometry or a way to calculate length.")
+                        roads_proj_for_calc['length_m'] = roads_proj_for_calc.geometry.length
+                    elif 'length_m' not in roads_proj_for_calc.columns:
+                        raise ValueError("Roads GDF missing geometry or a way to calculate length.")
 
                     for _, parish_row in parishes_proj_for_roads.iterrows():
-                        parish_name_key = parish_row.get('name') 
+                        parish_name_key = parish_row.get('name')
                         if pd.isna(parish_name_key) or parish_name_key == 'Unknown Parish': continue
                         
                         parish_geom = parish_row.geometry
@@ -713,9 +869,9 @@ class TerraDashboardLogic:
                         total_length_m = 0.0
                         if not intersecting_roads.empty:
                             clipped_roads = gpd.clip(intersecting_roads, parish_geom, keep_geom_type=False)
-                            if not clipped_roads.empty and 'length_m' in clipped_roads.columns : 
+                            if not clipped_roads.empty and 'length_m' in clipped_roads.columns :
                                 total_length_m = clipped_roads['length_m'].sum()
-                            elif not clipped_roads.empty: 
+                            elif not clipped_roads.empty:
                                 total_length_m = clipped_roads.geometry.length.sum()
 
                         total_length_km = total_length_m / 1000.0
@@ -734,22 +890,22 @@ class TerraDashboardLogic:
                 self.parish_summary_df = pd.merge(self.parish_summary_df, road_stats_df, on=group_by_col_summary, how='left')
                 self.parish_summary_df[['total_road_length_km', 'road_density_km_sqkm']] = self.parish_summary_df[['total_road_length_km', 'road_density_km_sqkm']].fillna(0)
                 self._capture_print("Merged road stats into parish summary.")
-            elif not self.parish_summary_df.empty: 
-                   self.parish_summary_df['total_road_length_km'] = self.parish_summary_df.get('total_road_length_km', 0.0)
-                   self.parish_summary_df['road_density_km_sqkm'] = self.parish_summary_df.get('road_density_km_sqkm', 0.0)
+            elif not self.parish_summary_df.empty:
+                self.parish_summary_df['total_road_length_km'] = self.parish_summary_df.get('total_road_length_km', 0.0)
+                self.parish_summary_df['road_density_km_sqkm'] = self.parish_summary_df.get('road_density_km_sqkm', 0.0)
 
             m = self.create_map_object_streamlit()
             if m: self.map_html_content = m.get_root().render(); self._capture_print("\nInteractive map data generated.")
             else: self.map_html_content = None; self._capture_print("\nCould not generate map - data missing?")
 
             fig_chart, ax_chart = plt.subplots(figsize=(10,6))
-            chart_group_col = group_by_col_summary 
+            chart_group_col = group_by_col_summary
             unique_parishes_for_chart = sorted(analyzed_gdf[chart_group_col].unique()) if chart_group_col and not analyzed_gdf.empty and chart_group_col in analyzed_gdf.columns else []
             if unique_parishes_for_chart:
-                cmap_name = 'viridis' 
+                cmap_name = 'viridis'
                 try:
                     cmap = plt.cm.get_cmap(cmap_name, len(unique_parishes_for_chart))
-                except ValueError: 
+                except ValueError:
                     cmap = plt.cm.get_cmap(cmap_name)
 
                 colors = [cmap(i) for i in range(len(unique_parishes_for_chart))]
@@ -763,7 +919,6 @@ class TerraDashboardLogic:
             fig_chart.savefig(self.chart_path,dpi=100,bbox_inches='tight'); plt.close(fig_chart); self._capture_print(f"Price vs. Beach Distance chart generated: {self.chart_path}");
 
         except Exception as e: self._capture_print(f"Error visualizations: {e}\n{traceback.format_exc()}");
-
 
     def display_stats_internal(self):
         self.stats_data_for_streamlit = []
@@ -818,7 +973,6 @@ class TerraDashboardLogic:
                     self.stats_data_for_streamlit.append("Total Road Network Length (Island): N/A (Road data not loaded)")
                     self.stats_data_for_streamlit.append("Overall Road Density (Island): N/A")
 
-
         except Exception as e: self._capture_print(f"Error display_stats: {e}\n{traceback.format_exc()}"); self.stats_data_for_streamlit.append("Error loading stats.")
 
     def get_export_dataframe(self):
@@ -829,7 +983,7 @@ class TerraDashboardLogic:
                     df_to_export['Property Type_Original'] = self.analyzed_properties['Property Type']
             if 'geometry' in df_to_export.columns and not df_to_export.geometry.empty:
                 if df_to_export.crs and df_to_export.crs != "EPSG:4326":
-                        df_to_export = df_to_export.to_crs("EPSG:4326")
+                    df_to_export = df_to_export.to_crs("EPSG:4326")
                 df_to_export['latitude'] = df_to_export.geometry.y
                 df_to_export['longitude'] = df_to_export.geometry.x
             cols_to_drop = ['geometry', 'original_index', 'Parish_join_key']
@@ -849,7 +1003,7 @@ class TerraDashboardLogic:
             return self.ai_parish_road_assessment_text
             
         required_road_cols = ['total_road_length_km', 'road_density_km_sqkm', 'area_sqkm', 'total_properties']
-        name_col_options = ['OSM_Parish_Name', 'Parish', 'name'] 
+        name_col_options = ['OSM_Parish_Name', 'Parish', 'name']
         name_col = next((col for col in name_col_options if col in self.parish_summary_df.columns), None)
 
         if not name_col:
@@ -861,7 +1015,7 @@ class TerraDashboardLogic:
             if col not in self.parish_summary_df.columns:
                 missing_cols_messages.append(f"'{col}' column missing")
             elif self.parish_summary_df[col].isnull().all():
-                 missing_cols_messages.append(f"'{col}' column has no data")
+                missing_cols_messages.append(f"'{col}' column has no data")
         
         if missing_cols_messages:
             self.ai_parish_road_assessment_text = f"Road network statistics ({', '.join(missing_cols_messages)}) are missing or empty in parish summary. Cannot perform AI road assessment."
@@ -870,25 +1024,24 @@ class TerraDashboardLogic:
         parish_data_for_ai = self.parish_summary_df[[name_col] + required_road_cols].copy()
         parish_data_for_ai.rename(columns={name_col: 'Parish Name'}, inplace=True)
 
-        for col in required_road_cols: 
+        for col in required_road_cols:
             if pd.api.types.is_numeric_dtype(parish_data_for_ai[col]):
                 if col in ['total_road_length_km', 'area_sqkm']:
                     parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "N/A")
-                elif col == 'road_density_km_sqkm': 
+                elif col == 'road_density_km_sqkm':
                     parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A")
                 elif col == 'total_properties':
-                     parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "N/A")
-
+                   parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "N/A")
 
         data_summary_str = parish_data_for_ai.to_string(index=False, na_rep='N/A')
-        max_prompt_table_len = 10000 
+        max_prompt_table_len = 10000
         if len(data_summary_str) > max_prompt_table_len:
             self._capture_print(f"WARN: Road assessment summary string for AI is too long ({len(data_summary_str)} chars), truncating.")
             data_summary_str = data_summary_str[:max_prompt_table_len] + "\n... (table truncated due to length)"
 
         prompt = f"""
 You are a Senior Real Estate Strategist at Terra Caribbean, specializing in the impact of infrastructure on property markets in Barbados.
-You have been provided with data summarizing road network characteristics for various parishes: Parish Name, Total Road Length (km), Road Density (km/km²), Parish Area (km²), and Total Properties (from an analyzed dataset in that parish). 
+You have been provided with data summarizing road network characteristics for various parishes: Parish Name, Total Road Length (km), Road Density (km/km²), Parish Area (km²), and Total Properties (from an analyzed dataset in that parish).
 'N/A' means data is not available or zero.
 
 Road Network Data by Parish:
@@ -920,17 +1073,18 @@ Please structure your analysis as follows:
 
 **Important Guidelines:**
 * **Terra Caribbean Focus:** All insights must be framed from the perspective of their relevance and impact on Terra Caribbean's real estate business operations, client advisory, and strategic interests.
-* **Data-Driven:** Strictly base your analysis on the provided road network data. Do not use external knowledge about specific road projects or conditions.
+* **Data-Driven:** Strictly base your analysis on the provided data table. Do not use external knowledge about specific road projects or conditions.
 * **Actionable Tone:** Insights should highlight areas for strategic focus, further investigation, or specific advisory points for Terra Caribbean.
 * **Clarity and Conciseness:** Present information clearly and directly for a business audience.
+* **Acknowledge Data Limitations:** If 'N/A' values or the snapshot nature of the data limit the depth of certain future projections, clearly state this.
 """
         try:
             self._capture_print(f"\nSending prompt for AI Parish Road (Strategic) Assessment. Data string length: {len(data_summary_str)}")
             response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo-0125", 
+                model="gpt-3.5-turbo-0125",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.4, 
-                max_tokens=1500 
+                temperature=0.4,
+                max_tokens=1500
             )
             self.ai_parish_road_assessment_text = response.choices[0].message.content
             return self.ai_parish_road_assessment_text
@@ -939,7 +1093,7 @@ Please structure your analysis as follows:
             self.ai_parish_road_assessment_text = f"AI Parish Road (Strategic) Assessment failed: {str(e)}"
             return self.ai_parish_road_assessment_text
 
-    def generate_ai_parish_property_analysis(self): 
+    def generate_ai_parish_property_analysis(self):
         if not OPENAI_API_KEY:
             self.ai_parish_property_assessment_text = "AI features disabled: OpenAI API key not configured."
             return self.ai_parish_property_assessment_text
@@ -953,15 +1107,14 @@ Please structure your analysis as follows:
         name_col_options = ['OSM_Parish_Name', 'Parish', 'name']
         name_col_to_use = next((col for col in name_col_options if col in summary_df_for_ai.columns), None)
         if not name_col_to_use:
-             self.ai_parish_property_assessment_text = "Parish name column missing from summary data."
-             return self.ai_parish_property_assessment_text
+                    self.ai_parish_property_assessment_text = "Parish name column missing from summary data."
+                    return self.ai_parish_property_assessment_text
         summary_df_for_ai.rename(columns={name_col_to_use: 'Parish Name'}, inplace=True)
 
         if 'avg_beach_dist_m' in summary_df_for_ai.columns:
             summary_df_for_ai['avg_beach_dist_km'] = (summary_df_for_ai['avg_beach_dist_m'] / 1000)
         else:
             summary_df_for_ai['avg_beach_dist_km'] = np.nan
-
 
         cols_for_ai_prompt = [
             'Parish Name', 'total_properties', 'area_sqkm', 'property_density',
@@ -979,27 +1132,26 @@ Please structure your analysis as follows:
             existing_cols_for_prompt.insert(0, existing_cols_for_prompt.pop(existing_cols_for_prompt.index('Parish Name')))
         else:
             if 'Parish Name' in summary_df_for_ai.columns:
-                 existing_cols_for_prompt.insert(0, 'Parish Name')
+                existing_cols_for_prompt.insert(0, 'Parish Name')
 
         parish_data_for_ai = summary_df_for_ai[existing_cols_for_prompt].copy()
 
-        for col in parish_data_for_ai.columns: 
+        for col in parish_data_for_ai.columns:
             if col == 'Parish Name': continue
             if pd.api.types.is_numeric_dtype(parish_data_for_ai[col]):
                 if 'price' in col.lower():
                     parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "N/A")
                 elif col in ['area_sqkm', 'avg_beach_dist_km', 'avg_bedrooms', 'total_road_length_km', 'avg_tourism_count_2km', 'avg_size_sqft']:
-                     parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "N/A")
-                else: 
-                     parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A")
-            elif pd.api.types.is_integer_dtype(parish_data_for_ai[col]): 
-                 parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
-            else: 
-                 parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: str(x) if pd.notna(x) else "N/A")
-
+                   parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "N/A")
+                else:
+                   parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A")
+            elif pd.api.types.is_integer_dtype(parish_data_for_ai[col]):
+                   parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
+            else:
+                   parish_data_for_ai[col] = parish_data_for_ai[col].apply(lambda x: str(x) if pd.notna(x) else "N/A")
 
         data_summary_str = parish_data_for_ai.to_string(index=False, na_rep='N/A')
-        max_prompt_table_len = 15000 
+        max_prompt_table_len = 15000
         if len(data_summary_str) > max_prompt_table_len:
             self._capture_print(f"WARN: Parish summary string for AI is too long ({len(data_summary_str)} chars), truncating.")
             data_summary_str = data_summary_str[:max_prompt_table_len] + "\n... (table truncated due to length)"
@@ -1035,20 +1187,20 @@ Please structure your strategic report for Terra Caribbean's leadership as follo
     * Synthesize overarching themes from the parish analyses (e.g., are there island-wide trends in demand for specific property types? Are certain regions clearly emerging as growth corridors versus established markets?).
     * Provide 2-3 high-level, actionable recommendations for Terra Caribbean's leadership to optimize its overall business strategy, capitalize on identified opportunities, and mitigate risks across Barbados in the coming years. These should be justified by the aggregated data patterns.
 
-**Important Guidelines for Your Report:**
+**Important Guidelines:**
 * **Terra Caribbean Centric:** All interpretations, opportunities, risks, and recommendations must be framed in terms of their direct relevance and impact on Terra Caribbean's business goals and operations.
-* **Data-Driven & Evidence-Based:** Every assertion must be explicitly tied back to the provided data table. Avoid speculation or external knowledge.
-* **Forward-Looking & Actionable:** Emphasize future implications and provide suggestions that can inform concrete business decisions.
-* **Clarity, Brevity & Professionalism:** Use language appropriate for an executive audience. Be direct and to the point.
+* **Data-Driven:** Strictly base your analysis on the provided data table. Do not use external knowledge about specific road projects or conditions.
+* **Actionable Tone:** Insights should highlight areas for strategic focus, further investigation, or specific advisory points for Terra Caribbean.
+* **Clarity and Conciseness:** Present information clearly and directly for a business audience.
 * **Acknowledge Data Limitations:** If 'N/A' values or the snapshot nature of the data limit the depth of certain future projections, clearly state this.
 """
         try:
-            self._capture_print(f"\nSending prompt for AI Parish Property (Strategic Business) Analysis. Data string length: {len(data_summary_str)}")
+            self._capture_print(f"\nSending prompt for AI Parish Property (Strategic Business) Assessment. Data string length: {len(data_summary_str)}")
             response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo-0125", 
+                model="gpt-3.5-turbo-0125",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3, 
-                max_tokens=2000 
+                temperature=0.3,
+                max_tokens=2000
             )
             self.ai_parish_property_assessment_text = response.choices[0].message.content
             return self.ai_parish_property_assessment_text
@@ -1057,10 +1209,13 @@ Please structure your strategic report for Terra Caribbean's leadership as follo
             self.ai_parish_property_assessment_text = f"AI Parish Property (Strategic Business) Analysis failed: {str(e)}"
             return self.ai_parish_property_assessment_text
 
-
 # --- Streamlit App UI and Main Logic ---
 def main():
     st.set_page_config(page_title="Terra Caribbean: Terrain View", layout="wide", initial_sidebar_state="expanded")
+    
+    # --- Robust Session State Initialization ---
+    # Ensure all session_state keys are initialized at the very beginning
+    # This prevents the "AttributeError: st.session_state has no attribute"
     if 'analysis_triggered' not in st.session_state: st.session_state.analysis_triggered = False
     if 'dashboard_logic_instance' not in st.session_state: st.session_state.dashboard_logic_instance = None
     if 'error_during_analysis' not in st.session_state: st.session_state.error_during_analysis = False
@@ -1072,6 +1227,11 @@ def main():
     if 'distance_result' not in st.session_state: st.session_state.distance_result = None
     if 'ai_parish_road_assessment_result' not in st.session_state: st.session_state.ai_parish_road_assessment_result = None
     if 'ai_parish_property_assessment_result' not in st.session_state: st.session_state.ai_parish_property_assessment_result = None
+    # Initialize map center inputs with defaults, so they always exist
+    if 'map_center_lat_input' not in st.session_state: st.session_state.map_center_lat_input = 13.1731
+    if 'map_center_lon_input' not in st.session_state: st.session_state.map_center_lon_input = -59.6369
+    if 'map_zoom_input' not in st.session_state: st.session_state.map_zoom_input = 14
+    # --- End Session State Initialization ---
 
 
     LOGO_URL = "https://s3.us-east-2.amazonaws.com/terracaribbean.com/wp-content/uploads/2025/04/08080016/site-logo.png"
@@ -1080,17 +1240,17 @@ def main():
     with st.sidebar:
         st.image(LOGO_URL, width=200) # Correct usage of LOGO_URL
 
-        WEATHER_API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY") or st.secrets.get("OPENWEATHERMAP_API_KEY") 
+        WEATHER_API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY") or st.secrets.get("OPENWEATHERMAP_API_KEY")
         
         if WEATHER_API_KEY:
-            weather_data = get_weather_data(WEATHER_API_KEY, city="Bridgetown,BB") 
+            weather_data = get_weather_data(WEATHER_API_KEY, city="Bridgetown,BB")
             if weather_data:
                 st.subheader(f"Weather in {weather_data.get('city_name', 'Bridgetown')}")
-                cols = st.columns([1, 3]) 
-                with cols[0]: 
+                cols = st.columns([1, 3])
+                with cols[0]:
                     if weather_data.get("icon_url"):
-                        st.image(weather_data["icon_url"], width=60) 
-                with cols[1]: 
+                        st.image(weather_data["icon_url"], width=60)
+                with cols[1]:
                     st.markdown("<div style='font-size: 12px; color: #707070; margin-bottom: -2px;'>Temp</div>", unsafe_allow_html=True)
                     if weather_data.get("temp") is not None:
                         st.markdown(f"<div style='font-size: 36px; font-weight: bold; line-height: 1.1;'>{weather_data['temp']:.0f}°C</div>", unsafe_allow_html=True)
@@ -1100,7 +1260,11 @@ def main():
                     if weather_data.get("humidity") is not None: details_for_line.append(f"Humidity: {weather_data['humidity']}%")
                     main_details_string = " ".join(details_for_line)
                     wind_string_part = ""
-                    if weather_data.get("wind_speed") is not None: wind_string_part = f"Wind: {weather_data['wind_speed']:.1f} m/s"
+                    # The walrus operator (:=) requires Python 3.8+
+                    # If you're on an older Python, use:
+                    # wind_data = weather_data.get("wind_speed")
+                    # if wind_data is not None: wind_string_part = f"Wind: {wind_data:.1f} m/s"
+                    if wind_data := weather_data.get("wind_speed"): wind_string_part = f"Wind: {wind_data:.1f} m/s"
                     final_display_string = main_details_string
                     if wind_string_part:
                         if final_display_string: final_display_string += f" | {wind_string_part}"
@@ -1109,18 +1273,32 @@ def main():
             else: st.warning("🌦️ Could not fetch weather data.")
         else: st.info("🌦️ Weather display disabled. Add `OPENWEATHERMAP_API_KEY` to Streamlit secrets.")
 
-        st.markdown("---") 
+        st.markdown("---")
         st.header("Controls")
-        uploaded_file = st.file_uploader("Upload Property Data (Excel .xlsx or CSV .csv)", type=["xlsx", "csv"], key=f"file_uploader_{st.session_state.uploader_key}")
+        
+        # --- MODIFIED: REMOVED FILE UPLOADER ---
+        st.info("Ensure `Terra Caribbean NEW SAMPLE R.xlsx` is in the app folder.")
         status_placeholder = st.empty()
         run_button_clicked = st.button("🚀 Run Analysis", use_container_width=True)
 
         if st.session_state.get('analysis_done') and dashboard_instance:
             st.markdown("---"); st.header("Locate on Map")
-            lat_val, lon_val, zoom_val = st.session_state.get('map_center_lat_input', 13.1731), st.session_state.get('map_center_lon_input', -59.6369), st.session_state.get('map_zoom_input', 14)
-            lat_input, lon_input, zoom_input = st.number_input("Latitude:", value=lat_val, format="%.6f", key="lat_input_widget"), st.number_input("Longitude:", value=lon_val, format="%.6f", key="lon_input_widget"), st.slider("Zoom Level:", 10, 18, zoom_val, key="zoom_input_widget")
+            # These values are now guaranteed to exist due to initialization at the top of main()
+            lat_input = st.number_input("Latitude:", value=st.session_state.map_center_lat_input, format="%.6f", key="lat_input_widget")
+            lon_input = st.number_input("Longitude:", value=st.session_state.map_center_lon_input, format="%.6f", key="lon_input_widget")
+            zoom_input = st.slider("Zoom Level:", 10, 18, st.session_state.map_zoom_input, key="zoom_input_widget")
+
             if st.button("📍 Go to Location", use_container_width=True):
-                st.session_state.update({'map_center_lat': lat_input, 'map_center_lon': lon_input, 'map_zoom': zoom_input, 'location_explicitly_set': True, 'map_center_lat_input': lat_input, 'map_center_lon_input': lon_input, 'map_zoom_input': zoom_input, 'needs_map_update': True})
+                st.session_state.update({
+                    'map_center_lat': lat_input,
+                    'map_center_lon': lon_input,
+                    'map_zoom': zoom_input,
+                    'location_explicitly_set': True,
+                    'map_center_lat_input': lat_input, # Update inputs as well for next rerun
+                    'map_center_lon_input': lon_input,
+                    'map_zoom_input': zoom_input,
+                    'needs_map_update': True
+                })
                 identified_parish_name = dashboard_instance.get_parish_for_coords(lat_input, lon_input)
                 parish_info_strs = {"parish_area": "N/A", "parish_avg_beach_dist": "N/A", "parish_avg_tourism_count": "N/A", "parish_total_road_length": "N/A", "parish_road_density": "N/A"}
                 valid_parish_identified = identified_parish_name and identified_parish_name not in ["Not within a known parish boundary.", "Error during parish lookup.", "Parish data not available or coordinates invalid.", "Parish name not identified", "Unknown Parish", "Unnamed Parish"]
@@ -1151,7 +1329,7 @@ def main():
                     st.markdown(f"&nbsp;&nbsp;&nbsp;Total Road Length: {info.get('parish_total_road_length', 'N/A')}")
                     st.markdown(f"&nbsp;&nbsp;&nbsp;Road Density: {info.get('parish_road_density', 'N/A')}")
         
-        st.markdown("---") 
+        st.markdown("---")
         st.header("📏 Calculate Distance")
         st.write("Enter the coordinates for two points to calculate the 'as-the-crow-flies' distance between them.")
         col1, col2 = st.columns(2)
@@ -1177,43 +1355,53 @@ def main():
     * ***Other layers (Schools, Supermarkets, Road Network, Land Features, POIs) are hidden by default but can be enabled via the layer control (top-right of the map).***
     """)
 
+    # --- MODIFIED: Analysis runs on button click without checking for uploaded file ---
     if run_button_clicked:
-        if uploaded_file is not None:
-            st.session_state.update({
-                'analysis_triggered': True, 'error_during_analysis': False, 'dashboard_logic_instance': None,
-                'location_explicitly_set': False, 'needs_map_update': False, 'location_info': None, 
-                'distance_result': None, 'ai_parish_road_assessment_result': None,
-                'ai_parish_property_assessment_result': None 
-            }) 
-            for key in ['map_center_lat', 'map_center_lon', 'map_zoom', 'map_center_lat_input', 'map_center_lon_input', 'map_zoom_input']:
-                if key in st.session_state: del st.session_state[key]
-            with status_placeholder.container(), st.spinner("Analysis in progress... This may take a few minutes for the first run or new data."):
-                dashboard = TerraDashboardLogic(uploaded_file_object=uploaded_file)
-                analysis_successful = dashboard.run_analysis_streamlit()
-            if analysis_successful:
-                st.session_state.update({'dashboard_logic_instance': dashboard, 'analysis_done': True, 'needs_map_update': True})
-                status_placeholder.success("Analysis Complete!")
-                st.rerun()
-            else:
-                st.session_state.update({'dashboard_logic_instance': dashboard, 'analysis_done': False, 'error_during_analysis': True})
-                status_placeholder.error("Analysis failed. Check Console Log tab.")
-            st.session_state.uploader_key += 1
+        st.session_state.update({
+            'analysis_triggered': True,
+            'error_during_analysis': False,
+            'dashboard_logic_instance': None,
+            'location_explicitly_set': False,
+            'needs_map_update': False,
+            'location_info': None,
+            'distance_result': None,
+            'ai_parish_road_assessment_result': None,
+            'ai_parish_property_assessment_result': None
+        })
+        for key in ['map_center_lat', 'map_center_lon', 'map_zoom']:
+            if key in st.session_state: del st.session_state[key]
+        
+        with status_placeholder.container(), st.spinner("Analysis in progress... This may take a few minutes for the first run or new data."):
+            dashboard = TerraDashboardLogic()
+            analysis_successful = dashboard.run_analysis_streamlit()
+        
+        if analysis_successful:
+            st.session_state.update({'dashboard_logic_instance': dashboard, 'analysis_done': True, 'needs_map_update': True})
+            status_placeholder.success("Analysis Complete!")
+            st.rerun()
         else:
-            st.sidebar.warning("⚠️ Please upload a property data file first!"); st.session_state.analysis_done = False
+            st.session_state.update({'dashboard_logic_instance': dashboard, 'analysis_done': False, 'error_during_analysis': True})
+            status_placeholder.error("Analysis failed. Check Console Log tab.")
 
+    # This block ensures dashboard_instance is always correctly retrieved for UI elements
     dashboard_instance = st.session_state.get('dashboard_logic_instance')
+    
     if dashboard_instance:
-        tab_titles = ["🗺️ Terrain Map", "📊 Chart", "📈 Key Statistics", "📊 Parish Summary", 
-                      "💡 AI Road Insights", "🏡 AI Property Insights", 
+        tab_titles = ["🗺️ Terrain Map", "📊 Chart", "📈 Key Statistics", "📊 Parish Summary",
+                      "💡 AI Road Insights", "🏡 AI Property Insights",
                       "📥 Export Data", "📋 Console Log", "ℹ️ Calculations & Notes"]
         tabs = st.tabs(tab_titles)
 
-        with tabs[0]: 
+        with tabs[0]:
             st.subheader("Interactive Terrain Map with Property Summaries")
             if st.session_state.get('analysis_done') and dashboard_instance:
+                # Only re-render map if needed or if it hasn't been rendered yet
                 if st.session_state.get('needs_map_update', False) or not dashboard_instance.map_html_content:
                     with st.spinner("Generating / Updating map..."):
-                        map_lat, map_lon, map_zoom = st.session_state.get('map_center_lat'), st.session_state.get('map_center_lon'), st.session_state.get('map_zoom')
+                        # Get map center and zoom from session_state, or use defaults
+                        map_lat = st.session_state.get('map_center_lat', 13.1939)
+                        map_lon = st.session_state.get('map_center_lon', -59.5432)
+                        map_zoom = st.session_state.get('map_zoom', 10)
                         map_obj = dashboard_instance.create_map_object_streamlit(center_lat=map_lat, center_lon=map_lon, zoom=map_zoom)
                         dashboard_instance.map_html_content = map_obj.get_root().render() if map_obj else "<p>Error generating map. Check data.</p>"
                     st.session_state.needs_map_update = False
@@ -1223,7 +1411,7 @@ def main():
             else: st.info("Map will be displayed here after analysis is run.")
 
 
-        with tabs[1]: 
+        with tabs[1]:
             st.subheader("Price vs. Beach Distance Chart")
             if st.session_state.get('analysis_done') and dashboard_instance.chart_path and os.path.exists(dashboard_instance.chart_path):
                 try: st.image(Image.open(dashboard_instance.chart_path), caption="Property Price vs. Distance to Nearest Beach", use_container_width=True)
@@ -1231,14 +1419,14 @@ def main():
             elif st.session_state.get('analysis_triggered'): st.info("Chart is being generated...")
             else: st.info("Chart will be displayed here after analysis is run.")
 
-        with tabs[2]: 
+        with tabs[2]:
             st.subheader("Key Statistics")
             if st.session_state.get('analysis_done') and hasattr(dashboard_instance, 'stats_data_for_streamlit') and dashboard_instance.stats_data_for_streamlit:
                 for item in dashboard_instance.stats_data_for_streamlit: st.markdown(f"- {item}")
             elif st.session_state.get('analysis_triggered'): st.info("Statistics are being generated.")
             else: st.info("Key statistics will be displayed here after analysis is run.")
 
-        with tabs[3]: 
+        with tabs[3]:
             st.subheader("Consolidated Parish Summary")
             if st.session_state.get('analysis_done') and hasattr(dashboard_instance, 'parish_summary_df') and not dashboard_instance.parish_summary_df.empty:
                 summary_df_display = dashboard_instance.parish_summary_df.copy()
@@ -1255,7 +1443,6 @@ def main():
                 ]
                 
                 final_display_cols = [col for col in display_cols_ordered if col in summary_df_display.columns]
-                from collections import OrderedDict 
                 final_display_cols = list(OrderedDict.fromkeys(final_display_cols))
 
                 summary_df_to_show = summary_df_display[final_display_cols].copy()
@@ -1276,13 +1463,13 @@ def main():
                     if col in summary_df_to_show.columns:
                         summary_df_to_show[col] = pd.to_numeric(summary_df_to_show[col], errors='coerce')
                         if callable(fmt_str_or_func):
-                             summary_df_to_show[col] = summary_df_to_show[col].apply(fmt_str_or_func)
+                            summary_df_to_show[col] = summary_df_to_show[col].apply(fmt_str_or_func)
                         else:
-                             summary_df_to_show[col] = summary_df_to_show[col].apply(lambda x: fmt_str_or_func.format(x) if pd.notna(x) else "N/A")
+                            summary_df_to_show[col] = summary_df_to_show[col].apply(lambda x: fmt_str_or_func.format(x) if pd.notna(x) else "N/A")
                 
                 int_cols = [
-                    'total_properties', 'total_for_sale', 'for_sale_res_count', 'for_sale_com_count', 
-                    'for_sale_land_count', 'for_sale_oth_std_count', 'total_for_rent', 
+                    'total_properties', 'total_for_sale', 'for_sale_res_count', 'for_sale_com_count',
+                    'for_sale_land_count', 'for_sale_oth_std_count', 'total_for_rent',
                     'for_rent_res_count', 'for_rent_com_count', 'for_rent_land_count', 'for_rent_oth_std_count'
                 ]
                 for col in int_cols:
@@ -1316,7 +1503,7 @@ def main():
                                 if col not in dashboard_instance.parish_summary_df.columns or dashboard_instance.parish_summary_df[col].isnull().all():
                                     all_present_and_has_data = False
                                     missing_cols_display.append(col)
-                        else: 
+                        else:
                             all_present_and_has_data = False
                             missing_cols_display.append("Parish Name identifier")
 
@@ -1329,20 +1516,20 @@ def main():
                                     st.session_state.ai_parish_road_assessment_result = assessment_text
                             
                             st.caption("""
-                                ℹ️ **AI Perspective:** The insights below are generated from the viewpoint of a Senior Real Estate Strategist at Terra Caribbean. 
-                                The analysis focuses on how road networks impact local property markets and is based *solely* on the processed data presented to the AI. 
+                                ℹ️ **AI Perspective:** The insights below are generated from the viewpoint of a Senior Real Estate Strategist at Terra Caribbean.
+                                The analysis focuses on how road networks impact local property markets and is based *solely* on the processed data presented to the AI.
                                 Different data or a modified analytical focus could lead to different perspectives or conclusions.
                                 """)
 
                             if st.session_state.get('ai_parish_road_assessment_result'):
                                 st.markdown("---")
                                 st.markdown(st.session_state.ai_parish_road_assessment_result)
-                            elif not st.session_state.get('ai_parish_road_assessment_result') and not missing_cols_display : 
+                            elif not st.session_state.get('ai_parish_road_assessment_result') and not missing_cols_display :
                                 st.caption("Click the 'Generate' button above to get an AI assessment of parish road networks, focusing on implications for Terra Caribbean.")
                 elif st.session_state.get('analysis_triggered'):
-                   st.info("Analysis is running. AI assessment will be available once complete.")
+                    st.info("Analysis is running. AI assessment will be available once complete.")
                 else:
-                   st.info("Run an analysis first to enable AI Parish Road Network Assessment.")
+                    st.info("Run an analysis first to enable AI Parish Road Network Assessment.")
 
         with tabs[5]: # AI Property Insights
             with st.expander("🏡 AI-Powered Strategic Property Market Insights", expanded=True): # Default to expanded
@@ -1352,7 +1539,7 @@ def main():
                     elif not hasattr(dashboard_instance, 'parish_summary_df') or dashboard_instance.parish_summary_df.empty:
                         st.info("Parish summary data is not yet available. Please run a full analysis first.")
                     else:
-                        expected_cols_for_prop_ai = ['avg_price', 'total_properties', 'property_density'] 
+                        expected_cols_for_prop_ai = ['avg_price', 'total_properties', 'property_density']
                         missing_cols_data = [col for col in expected_cols_for_prop_ai if col not in dashboard_instance.parish_summary_df.columns or dashboard_instance.parish_summary_df[col].isnull().all()]
                         
                         if missing_cols_data:
@@ -1364,11 +1551,11 @@ def main():
                                     st.session_state.ai_parish_property_assessment_result = assessment_text
                             
                             st.caption("""
-                                ℹ️ **AI Perspective:** This analysis is generated from the viewpoint of a Chief Market Strategist for Terra Caribbean. 
-                                It provides a forward-looking strategic assessment based *only* on the processed parish summary data. 
+                                ℹ️ **AI Perspective:** This analysis is generated from the viewpoint of a Chief Market Strategist for Terra Caribbean.
+                                It provides a forward-looking strategic assessment based *only* on the processed parish summary data.
                                 The insights aim to inform business decisions. Different data inputs or analytical objectives could change the focus.
                                 """)
-                                                        
+                                        
                             if st.session_state.get('ai_parish_property_assessment_result'):
                                 st.markdown("---")
                                 st.markdown(st.session_state.ai_parish_property_assessment_result)
@@ -1380,7 +1567,7 @@ def main():
                     st.info("Run an analysis first to enable AI Property Market Analysis.")
 
 
-        with tabs[6]: 
+        with tabs[6]:
             st.subheader("Export Analyzed Data")
             if st.session_state.get('analysis_done'):
                 export_df = dashboard_instance.get_export_dataframe()
@@ -1391,68 +1578,69 @@ def main():
                 elif st.session_state.get('analysis_triggered') : st.info("No analyzed data available for export.")
             else: st.info("Analyzed data will be available for export here after analysis is run.")
 
-        with tabs[7]: 
+        with tabs[7]:
             st.subheader("Analysis Log")
             if hasattr(dashboard_instance, 'log_capture') and dashboard_instance.log_capture:
                 st.text_area("Log Output:", value="".join(dashboard_instance.log_capture), height=500, key="console_log_area_display", disabled=True)
             elif st.session_state.get('analysis_triggered'): st.info("Attempting to capture logs...")
             else: st.info("Console logs from the analysis will appear here.")
 
-        with tabs[8]: 
-            st.subheader("Understanding the Calculations, Data & Conversions")
-            st.markdown("""
-            This section explains how data is processed by the application and provides some useful unit conversions.
+        with tabs[8]:
+            st.subheader("About This Project, Data, & Calculations")
 
+            # --- DISCLAIMER ADDED HERE ---
+            st.warning("""
+            **Disclaimer: This is a personal portfolio project and is not affiliated with, sponsored, or endorsed by Terra Caribbean.**
+
+            The property data used in this demonstration was collected from Terra Caribbean's public website for educational and analytical purposes. All analyses and "pitches" are hypothetical exercises designed to showcase data analysis skills in a real-world business context. The application's creator makes no warranties regarding the accuracy or completeness of the data.
+            """)
+            # --- END OF DISCLAIMER ---
+            
+            st.markdown("""
             #### 1. Geographic Data & Calculations 🗺️
-            * **Primary Data Source:** OpenStreetMap (OSM) is the main source for geographic features.
-            * **Boundaries & Features:** Parish boundaries, the road network, beaches, and various Points of Interest (POIs) like schools and supermarkets are fetched from OSM for Barbados.
-            * **Projections for Accuracy:** For calculations involving area or length (e.g., parish area, road length), the script uses the `EPSG:32620` projection (UTM Zone 20N). This projection is suitable for Barbados and provides measurements in meters, which are then often converted to kilometers. For display on maps, `EPSG:4326` (WGS84, standard latitude/longitude) is typically used.
-            * **Parish Area:** The area of each parish (shown in square kilometers, km²) is calculated based on its OSM polygon geometry after being projected.
-            * **Road Network Statistics (Parish Level - shown in map popups & sidebar):**
-            * **Total Road Length (km) per Parish:** This is the sum of the lengths of all road segments (obtained from OSM) that fall within the boundaries of a specific parish. To ensure accuracy, roads that cross parish boundaries are geometrically "clipped" to only include the portion within that parish before their lengths are summed.
-            * **Road Density (km/km²) per Parish:** This metric is calculated by dividing the `Total Road Length (km)` within a parish by that `Parish Area (km²)`. It indicates how densely a parish is covered by roads (e.g., a higher value means more kilometers of road for each square kilometer of land in that parish).
-            * **Road Network Statistics (Island Level - shown in "Key Statistics" tab):**
-            * **Total Road Network Length (Island):** The sum of lengths of all drivable road segments fetched for the entire island of Barbados from OSM. Lengths are originally in meters from OSM and converted to kilometers.
-            * **Overall Road Density (Island):** This is the `Total Road Network Length (Island)` in kilometers divided by the total land area of Barbados in square kilometers. It gives an average measure of road coverage for the entire island.
-            * **Property Geocoding:** Properties from your uploaded data file are assigned coordinates. These coordinates are based on the **centroid (geographic center point) of their listed parish**. A slight random "jitter" (small offset) is added to these coordinates if multiple properties fall in the same parish to prevent them from overlapping perfectly on the map. *Therefore, property markers on the map indicate the general parish area, not the exact street address of the property.*
-            * **Distances to Features:**
-            * **Beach Distance:** Calculated using a KDTree algorithm. This finds the shortest straight-line ("as the crow flies") distance from a property's assigned location (parish centroid) to the nearest point on any beach geometry fetched from OSM.
-            * **Tourism Count:** Represents the number of tourism-related POIs (from OSM) found within a 2-kilometer radius (a circular buffer) around a property's assigned location.
-            * **Haversine Distance Calculator (Sidebar Tool):** This tool calculates the great-circle distance (the shortest path on the surface of a sphere) between two latitude/longitude points that you enter. It's an "as-the-crow-flies" distance and **does not represent actual road/travel distance or take into account terrain or obstacles.**
+            * **Parish Boundaries & Area Calculation:** The application calculates parish areas based on digital map boundaries (polygons).
+              * **Data Source:** These boundaries are sourced **first from local files** (like `Parishes.shp`) if they exist in the app's directory. If not found, the app **falls back to data from OpenStreetMap (OSM)**, a global, community-edited map.
+              * **Why App-Calculated Areas May Differ from Official Figures:** You may notice that the parish areas calculated by this app differ slightly from official statistics found on Google or government websites. **This is expected.** The app correctly measures the area of the map polygons it is given, but these OSM polygons may not perfectly match the legally defined survey boundaries due to factors like coastline tracing and minor digitizing variations. The calculated area is only as accurate as the underlying map data.
+              * **Projection for Accuracy:** For calculations involving area or length, the script uses the `EPSG:32620` projection (UTM Zone 20N), which is highly accurate for Barbados and provides measurements in meters.
+
+            * **Road Network Statistics:**
+              * **Source:** All road data is fetched from OpenStreetMap.
+              * **Parish Road Density (km/km²):** This is calculated by dividing the `Total Road Length (km)` within a parish by that parish's `Calculated Area (km²)`. It shows how well-serviced an area is by roads.
+
+            * **Property Geocoding:** Properties from your uploaded file are assigned coordinates based on the **centroid (geographic center point) of their listed parish**. A slight random offset is added to prevent identical markers from completely overlapping. *Therefore, property markers indicate the general parish area, not the exact street address of the property.*
+            
+            * **Distance Calculations:**
+              * **Beach Distance:** This is the shortest straight-line ("as the crow flies") distance from a property's parish-centroid location to the nearest point on any beach polygon from OSM.
+              * **Haversine Distance Calculator (Sidebar):** This tool calculates the direct great-circle distance between two coordinate points. It does **not** account for roads, terrain, or other real-world travel factors.
 
             #### 2. Property Data Processing 🏡
-            * **Input Data:** The core analysis relies on the data you upload via an Excel (.xlsx) or CSV (.csv) file.
-            * **Size Conversion:** The 'Size' field from your input is parsed to extract building or land area. The script primarily aims to convert this to square footage (`Size_sqft`). It also attempts to convert "acres" to square feet if "acre" units are specified in the size description.
-            * **Bedrooms/Bathrooms:** These are typically extracted from the 'Description' field of your property data using pattern matching (e.g., looking for "3 Bed" or "2 Bath").
+            * **Input Data:** The analysis quality is directly related to the accuracy and completeness of the property data you upload in your Excel or CSV file.
             * **Data Cleaning & Standardization:**
-            * 'Property Type' values from your file are standardized into broader categories like Residential, Commercial, Land, or Other.
-            * Parish names are cleaned and standardized to match a known list of official parish names for Barbados to ensure accurate grouping and geocoding.
+                * 'Property Type' values are standardized into `Residential`, `Commercial`, `Land`, or `Other`.
+                * Parish names are cleaned to match a standard list to ensure accurate grouping.
 
             #### 3. Important Unit Conversions 📏
             * `1 kilometer (km) = 1,000 meters (m)`
             * `1 kilometer (km) ≈ 0.621371 miles`
-            * `1 square kilometer (km²) = 100 hectares (ha)`
-            * `1 square kilometer (km²) ≈ 0.386102 square miles (sq mi)`
-            * `1 square kilometer (km²) ≈ 247.105 acres`
             * `1 acre = 43,560 square feet (sq ft)`
+            * `1 square kilometer (km²) ≈ 247.1 acres`
 
             #### 4. Limitations & Considerations ⚠️
-            * **OSM Data Quality:** The accuracy and completeness of geographic features like roads, Points of Interest, and administrative boundaries depend on the data available in OpenStreetMap. OSM is a community-edited project, so data quality can vary by region and time.
-            * **Uploaded Data Accuracy:** The insights and analyses generated by this tool are heavily influenced by the accuracy, completeness, and formatting of the property data you provide in your uploaded file.
-            * **Geocoding Approximation:** Because properties are mapped to parish centroids (not precise addresses), any analysis based on exact location (like distance to a specific small POI or a particular road) is an approximation based on that parish-level geocoding.
-            * **Calculations as Estimates:** All derived statistics (distances, areas, densities, etc.) should be considered estimates based on the available data and the methodologies described above. They provide valuable insights but may not always reflect official or surveyed figures perfectly.
+            * **OSM Data Quality:** OpenStreetMap is an excellent but community-edited resource. The accuracy of features like roads and POIs can vary.
+            * **Geocoding Approximation:** Since properties are mapped to parish centers, all distance-based analysis is an approximation.
+            * **Calculations as Estimates:** All derived statistics (distances, areas, densities) are valuable estimates based on the available data and should be treated as such, not as official, surveyed figures.
             """)
             st.markdown("---"); st.write("Raw OSM Parish Data (if loaded):")
             if hasattr(dashboard_instance, 'raw_parishes_from_osm') and not dashboard_instance.raw_parishes_from_osm.empty:
                 st.dataframe(dashboard_instance.raw_parishes_from_osm.drop(columns='geometry', errors='ignore'))
             else: st.info("Raw OSM parish data was not loaded or is empty.")
 
-        if st.session_state.get('error_during_analysis'): st.error("An error occurred during the last analysis. Review the 'Console Log' tab.")
+    if st.session_state.get('error_during_analysis'): st.error("An error occurred during the last analysis. Review the 'Console Log' tab.")
     elif st.session_state.get('analysis_triggered', False) and st.session_state.get('error_during_analysis', False):
         st.error("Analysis failed. Check the console log if available.")
         if st.session_state.get('dashboard_logic_instance') and hasattr(st.session_state.dashboard_logic_instance, 'log_capture') and st.session_state.dashboard_logic_instance.log_capture:
             st.subheader("Partial Analysis Log"); st.text_area("Log Output:", value="".join(st.session_state.dashboard_logic_instance.log_capture), height=500, key="error_console_log_area_display_alt", disabled=True)
-    else: st.info("👋 Welcome! Please upload a property data file and click '🚀 Run Analysis' in the sidebar to begin.")
+    else: st.info("👋 Welcome! Please click '🚀 Run Analysis' in the sidebar to begin.")
 
     st.markdown("---")
     property_count = len(dashboard_instance.analyzed_properties) if st.session_state.get('analysis_done') and dashboard_instance and hasattr(dashboard_instance, 'analyzed_properties') and not dashboard_instance.analyzed_properties.empty else 0
